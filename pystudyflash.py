@@ -2,21 +2,32 @@ import os
 import pickle
 import sys
 
-from PyQt6.QtCore import Qt, QSettings
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import Qt, QSettings, QEvent, QTimer
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QCursor
 from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QPushButton, QWidget, QToolButton, QMenu, QToolBar, \
     QMdiArea, QMdiSubWindow, QDialog, QTableWidget, QTableWidgetItem, QFormLayout, \
-    QLineEdit, QHeaderView, QDialogButtonBox, QAbstractItemView, QCheckBox, QLabel, QTabWidget, QDockWidget, QHBoxLayout
+    QLineEdit, QHeaderView, QDialogButtonBox, QAbstractItemView, QCheckBox, QLabel, QTabWidget, QDockWidget, QHBoxLayout, QFrame
 
-from client import ScreenShareClient
-from server import ScreenShareServer
+from app_paths import address_book_file_path, settings_file_path
+
+
+def _get_client_class():
+    # Import client lazily so Qt initializes before win32 DPI side effects from dependencies.
+    from client import ScreenShareClient
+    return ScreenShareClient
+
+
+def _get_server_class():
+    # Import server lazily so Qt initializes before win32 DPI side effects from dependencies.
+    from server import ScreenShareServer
+    return ScreenShareServer
 
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.settings = QSettings('sets/settings.ini', QSettings.Format.IniFormat)
+        self.settings = QSettings(settings_file_path(), QSettings.Format.IniFormat)
         print(self.settings.fileName())
 
         self.setWindowTitle('Настройки')
@@ -192,11 +203,9 @@ class AddressBookDialog(QDialog):
                     self.view_entry(row)
 
     def load_data(self):
-        if not os.path.exists('sets'):
-            os.makedirs('sets')
-
-        if os.path.exists('sets/address_book'):
-            with open('sets/address_book', 'rb') as f:
+        address_book_path = address_book_file_path()
+        if os.path.exists(address_book_path):
+            with open(address_book_path, 'rb') as f:
                 data = pickle.load(f)
 
             for row_data in data:
@@ -217,7 +226,7 @@ class AddressBookDialog(QDialog):
                 row_data.append(item.text() if item else '')
             data.append(row_data)
 
-        with open('sets/address_book', 'wb') as f:
+        with open(address_book_file_path(), 'wb') as f:
             pickle.dump(data, f)
 
     def add_entry(self):
@@ -302,6 +311,194 @@ class AddressBookDialog(QDialog):
         self.save_data()
 
 
+class ViewerHostWindow(QMainWindow):
+    def __init__(self, server_key, on_close):
+        super().__init__()
+        self._server_key = server_key
+        self._on_close = on_close
+        self._fullscreen_mode = False
+        self._normal_geometry = None
+        self._normal_window_state = Qt.WindowState.WindowNoState
+        self._normal_window_flags = self.windowFlags()
+
+        self._overlay = QFrame(self)
+        self._overlay.setFrameShape(QFrame.Shape.StyledPanel)
+        self._overlay.setStyleSheet(
+            "QFrame { background: rgba(30, 30, 30, 220); color: white; border: 1px solid #505050; }"
+            "QPushButton { background: #444; color: white; border: 1px solid #666; padding: 4px 10px; }"
+            "QPushButton:hover { background: #555; }"
+        )
+        overlay_layout = QHBoxLayout(self._overlay)
+        overlay_layout.setContentsMargins(8, 6, 8, 6)
+        overlay_layout.setSpacing(8)
+        overlay_label = QLabel("Fullscreen mode")
+        overlay_hint = QLabel("Ctrl+Tab to exit")
+        overlay_exit = QPushButton("Exit Fullscreen")
+        overlay_exit.clicked.connect(self.exit_fullscreen_mode)
+        overlay_layout.addWidget(overlay_label)
+        overlay_layout.addStretch(1)
+        overlay_layout.addWidget(overlay_hint)
+        overlay_layout.addWidget(overlay_exit)
+        self._overlay.hide()
+        self._overlay.raise_()
+
+        self._overlay_hide_timer = QTimer(self)
+        self._overlay_hide_timer.setSingleShot(True)
+        self._overlay_hide_timer.timeout.connect(self._overlay.hide)
+
+        self._overlay_hover_timer = QTimer(self)
+        self._overlay_hover_timer.setInterval(120)
+        self._overlay_hover_timer.timeout.connect(self._refresh_overlay_hover)
+
+        self._fullscreen_shortcut = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        self._fullscreen_shortcut.activated.connect(self.exit_fullscreen_mode)
+        self._fullscreen_shortcut.setEnabled(False)
+
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setMouseTracking(True)
+        self.installEventFilter(self)
+
+    def set_client_widget(self, widget):
+        old_widget = self.centralWidget()
+        if old_widget is not None:
+            old_widget.removeEventFilter(self)
+        self.setCentralWidget(widget)
+        if widget is not None:
+            widget.setMouseTracking(True)
+            widget.installEventFilter(self)
+            bind = getattr(widget, 'set_viewer_window', None)
+            if callable(bind):
+                bind(self)
+            notify = getattr(widget, 'on_viewer_fullscreen_changed', None)
+            if callable(notify):
+                notify(self._fullscreen_mode)
+
+    def is_fullscreen_mode(self):
+        return self._fullscreen_mode
+
+    def toggle_fullscreen_mode(self):
+        if self._fullscreen_mode:
+            self.exit_fullscreen_mode()
+        else:
+            self.enter_fullscreen_mode()
+
+    def _notify_fullscreen_state(self):
+        widget = self.centralWidget()
+        if widget is None:
+            return
+        notify = getattr(widget, 'on_viewer_fullscreen_changed', None)
+        if callable(notify):
+            notify(self._fullscreen_mode)
+
+    def enter_fullscreen_mode(self):
+        if self._fullscreen_mode:
+            return
+        self._fullscreen_mode = True
+        self._normal_geometry = self.geometry()
+        self._normal_window_state = self.windowState()
+        self._normal_window_flags = self.windowFlags()
+        fullscreen_flags = (
+            self._normal_window_flags
+            | Qt.WindowType.Window
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setWindowFlags(fullscreen_flags)
+        screen = QApplication.screenAt(QCursor.pos())
+        if screen is not None and self.windowHandle() is not None:
+            self.windowHandle().setScreen(screen)
+        self.showFullScreen()
+        self._activate_fullscreen_window()
+        QTimer.singleShot(80, self._activate_fullscreen_window)
+        self._fullscreen_shortcut.setEnabled(True)
+        self._overlay_hover_timer.start()
+        self._position_overlay()
+        self._show_overlay_temporarily()
+        self._notify_fullscreen_state()
+
+    def exit_fullscreen_mode(self):
+        if not self._fullscreen_mode:
+            return
+        self._fullscreen_mode = False
+        self._fullscreen_shortcut.setEnabled(False)
+        self._overlay_hover_timer.stop()
+        self._overlay_hide_timer.stop()
+        self._overlay.hide()
+        self.setWindowFlags(self._normal_window_flags)
+        self.showNormal()
+        if self._normal_window_state == Qt.WindowState.WindowMaximized:
+            self.showMaximized()
+        elif self._normal_geometry is not None:
+            self.setGeometry(self._normal_geometry)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._notify_fullscreen_state()
+
+    def _position_overlay(self):
+        if not self._overlay.isVisible() and not self._fullscreen_mode:
+            return
+        width = max(300, self.width())
+        height = 46
+        self._overlay.setGeometry(0, 0, width, height)
+        self._overlay.raise_()
+
+    def _show_overlay_temporarily(self):
+        if not self._fullscreen_mode:
+            return
+        self._position_overlay()
+        self._overlay.show()
+        self._overlay.raise_()
+        self._overlay_hide_timer.start(1800)
+
+    def _refresh_overlay_hover(self):
+        if not self._fullscreen_mode:
+            return
+        local_pos = self.mapFromGlobal(QCursor.pos())
+        if 0 <= local_pos.x() <= self.width() and 0 <= local_pos.y() <= 4:
+            self._show_overlay_temporarily()
+
+    def _activate_fullscreen_window(self):
+        self.raise_()
+        self.activateWindow()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.requestActivate()
+
+    def eventFilter(self, watched, event):
+        if self._fullscreen_mode and event.type() in {QEvent.Type.MouseMove, QEvent.Type.Enter}:
+            self._refresh_overlay_hover()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._fullscreen_mode:
+            self._position_overlay()
+
+    def keyPressEvent(self, event):
+        if self._fullscreen_mode:
+            is_ctrl_tab = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and event.key() == Qt.Key.Key_Tab
+            if is_ctrl_tab:
+                self.exit_fullscreen_mode()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self._fullscreen_mode:
+            self.exit_fullscreen_mode()
+        client_widget = self.centralWidget()
+        if client_widget is not None:
+            stop_stream = getattr(client_widget, 'stop_stream', None)
+            if callable(stop_stream):
+                try:
+                    stop_stream()
+                except Exception:
+                    pass
+        if callable(self._on_close):
+            self._on_close(self._server_key, self)
+        super().closeEvent(event)
+
+
 class ScreenShareApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -316,12 +513,13 @@ class ScreenShareApp(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.settings_dock)  # и поместить в левую часть экрана
         self.settings_dock.hide()  # Скрыть доквиджет установок
 
-        self.settings = QSettings('sets/settings.ini', QSettings.Format.IniFormat)  # ссылка на файл установок
-        self.pub_server_address = self.settings.value('server_address', '')  # Считать параметры из файла настроек или оставить пустыми
-        self.pub_server_password = self.settings.value('server_password', '')
-        self.pub_mqtt_address = self.settings.value('mqtt_address', '')
-        self.pub_mqtt_port = self.settings.value('mqtt_port', '')
-        self.pub_mqtt_timeout = self.settings.value('mqtt_timeout', '')
+        self.settings = QSettings(settings_file_path(), QSettings.Format.IniFormat)  # ссылка на файл установок
+        # Считать параметры из файла настроек с явным указанием типа
+        self.pub_server_address = str(self.settings.value('server_address', '', type=str) or '')
+        self.pub_server_password = str(self.settings.value('server_password', '', type=str) or '')
+        self.pub_mqtt_address = str(self.settings.value('mqtt_address', '', type=str) or '')
+        self.pub_mqtt_port = self.settings.value('mqtt_port', 0, type=int)
+        self.pub_mqtt_timeout = self.settings.value('mqtt_timeout', 0, type=int)
 
         self.dialog = AddressBookDialog(self)  # Создать объект адресной книги
         self.server = None
@@ -391,26 +589,136 @@ class ScreenShareApp(QMainWindow):
     def open_settings(self):
         self.settings_dock.show()
 
-    def start_pub_server(self):  # Запускает сервер доступа к экрану компьютера
-        self.server = ScreenShareServer()  # Экземпляр текущего сервера
-        if len(self.pub_server_address) > 0 and len(self.pub_server_password) > 0:
-            self.server.show()
-            self.server.run(self.pub_server_address, self.pub_server_password, self.pub_mqtt_address, self.pub_mqtt_port, self.pub_mqtt_timeout)
+    def start_pub_server(self):  # ????????? ?????? ??????? ? ?????? ??????????
+        if self.server is None:
+            self.server = _get_server_class()(app_manager=self)  # ????????? ???????? ???????
+        settings = getattr(self, 'settings', None)
+        if settings is not None:
+            self.pub_server_address = str(settings.value('server_address', self.pub_server_address, type=str) or '').strip()
+            self.pub_server_password = str(settings.value('server_password', self.pub_server_password, type=str) or '').strip()
+            self.pub_mqtt_address = str(settings.value('mqtt_address', self.pub_mqtt_address, type=str) or '').strip()
+            self.pub_mqtt_port = settings.value('mqtt_port', self.pub_mqtt_port, type=int)
+            self.pub_mqtt_timeout = settings.value('mqtt_timeout', self.pub_mqtt_timeout, type=int)
+        server_address = str(self.pub_server_address or '').strip()
+        server_password = str(self.pub_server_password or '').strip()
+        mqtt_address = str(self.pub_mqtt_address or '').strip() or 'broker.hivemq.com'
+        try:
+            mqtt_port = int(str(self.pub_mqtt_port or '').strip() or 0)
+        except ValueError:
+            mqtt_port = 0
+        try:
+            mqtt_timeout = int(str(self.pub_mqtt_timeout or '').strip() or 0)
+        except ValueError:
+            mqtt_timeout = 0
+        self.server.show()
+        if not mqtt_address:
+            print('MQTT ????? ?? ?????, ?????? ?? ???????')
+            return
+        self.server.run(server_address, server_password, mqtt_address, mqtt_port, mqtt_timeout)
 
     def connect_to_server(self, server_address='address@mail.com', server_password='', mqtt_address='', mqtt_port=0,
                           mqtt_timeout=0):
-        client = ScreenShareClient()  # Создайте новый экземпляр ScreenShareClient
+        # Когда метод вызывается без аргументов, используем UI и сохранённые настройки
+        if server_address == 'address@mail.com' and not server_password and not mqtt_address and mqtt_port == 0 and mqtt_timeout == 0:
+            address_input = self.server_address_input.text().strip() if hasattr(self, 'server_address_input') else ''
+            settings = getattr(self, 'settings', None)
+            if settings is not None:
+                # Use UI input if provided, otherwise use settings
+                # Explicitly convert QSettings values to proper types with type=str to prevent bool conversion
+                server_address = address_input or str(settings.value('server_address', '', type=str))
+                server_password = str(settings.value('server_password', '', type=str))
+                mqtt_address = str(settings.value('mqtt_address', '', type=str))
+                mqtt_port = settings.value('mqtt_port', 0, type=int)
+                mqtt_timeout = settings.value('mqtt_timeout', 0, type=int)
+                
+                # Debug output
+                print(f"Client configuration:")
+                print(f"  UI input: '{address_input}'")
+                print(f"  Using server_address: '{server_address}'")
+                print(f"  Using server_password: '{server_password}'")
+                print(f"  Using mqtt_address: '{mqtt_address}'")
+                print(f"  Topic prefix will be: '{server_address}/{server_password}'")
+            else:
+                server_address = address_input
+                server_password = ''
+                mqtt_address = ''
+                mqtt_port = 0
+                mqtt_timeout = 0
+        
+        mqtt_port = int(str(mqtt_port).strip() or 0)
+        mqtt_timeout = int(str(mqtt_timeout).strip() or 0)
+        
+        # Validate server_address is a non-empty string
+        if not server_address or not isinstance(server_address, str):
+            print(f"Invalid server_address: {server_address} (type: {type(server_address)})")
+            server_address = 'Unknown Server'
+        
+        client = _get_client_class()()
         client.server_address = server_address
         client.server_password = server_password
         client.mqtt_address = mqtt_address
         client.mqtt_port = mqtt_port
         client.mqtt_timeout = mqtt_timeout
-        # Создайте подокно для этого сервера
-        self.servers[server_address] = QMdiSubWindow()  # Добавьте новый сервер в список
-        self.servers[server_address].setWindowTitle(server_address)  # Используйте адрес сервера в качестве заголовка
-        self.servers[server_address].setWidget(client)  # Замените QLabel на экземпляр ScreenShareClient
-        self.mdi_area.addSubWindow(self.servers[server_address])
-        self.servers[server_address].show()
+        client.user_initiated_close = False
+
+        existing_window = self.servers.get(server_address)
+        if existing_window is not None:
+            try:
+                existing_window.close()
+            except Exception:
+                pass
+
+        viewer_window = ViewerHostWindow(server_address, self._on_viewer_window_closed)
+        viewer_window.setWindowTitle(str(server_address))
+        viewer_window.resize(1100, 700)
+        viewer_window.set_client_widget(client)
+        bind_viewer_window = getattr(client, 'set_viewer_window', None)
+        if callable(bind_viewer_window):
+            bind_viewer_window(viewer_window)
+        self.servers[server_address] = viewer_window
+        viewer_window.show()
+        viewer_window.raise_()
+        viewer_window.activateWindow()
+        client.start_stream()
+
+    def _on_viewer_window_closed(self, server_key, window):
+        current = self.servers.get(server_key)
+        if current is window:
+            self.servers.pop(server_key, None)
+
+    def get_address_book_entry(self, identifier):
+        if not identifier:
+            return None
+        identifier = identifier.strip().lower()
+        table = getattr(self.dialog, 'table', None)
+        if table is None:
+            return None
+        def _text(item):
+            return item.text().strip() if item else ''
+        def _parse_int(value):
+            try:
+                return int(str(value).strip() or 0)
+            except (TypeError, ValueError):
+                return 0
+        for row in range(table.rowCount()):
+            server_item = table.item(row, 0)
+            user_item = table.item(row, 1)
+            server_value = _text(server_item).lower()
+            user_value = _text(user_item).lower()
+            if identifier in {server_value, user_value}:
+                password_item = table.item(row, 2)
+                mqtt_address_item = table.item(row, 4)
+                mqtt_port_item = table.item(row, 5)
+                mqtt_timeout_item = table.item(row, 6)
+                return {
+                    'server_address': _text(server_item),
+                    'username': _text(user_item),
+                    'password': _text(password_item),
+                    'mqtt_address': _text(mqtt_address_item),
+                    'mqtt_port': _parse_int(_text(mqtt_port_item)),
+                    'mqtt_timeout': _parse_int(_text(mqtt_timeout_item))
+                }
+        return None
 
     def open_address_book(self):
         self.dialog.exec()
@@ -425,3 +733,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
