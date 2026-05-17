@@ -1,74 +1,76 @@
 # pyStudyFlash
 
-pyStudyFlash is a PyQt6-based screen sharing application that allows remote control and viewing of computer screens. The application uses MQTT protocol for communication between server and client components, enabling real-time screen sharing and remote desktop control.
+pyStudyFlash - приложение на базе PyQt6 для демонстрации экрана и удаленного управления. Для обмена данными между сервером и клиентами используется протокол MQTT, что позволяет передавать изображение экрана и команды управления в реальном времени.
 
-## Features
+## Возможности
 
-- **Screen Sharing**: Share your desktop screen with remote clients in real-time
-- **Remote Control**: Allow remote users to control your mouse and keyboard
-- **Multi-client Support**: Support multiple clients connecting to the same server
-- **Secure Communication**: Uses MQTT protocol with authentication for secure communication
-- **Cursor Synchronization**: Real-time cursor position and type synchronization
-- **Keyboard Control**: Remote keyboard input support with special key handling
-- **Mouse Control**: Full mouse control including clicks, movement, and scrolling
-- **Address Book**: Save and manage frequently used server connections
-- **Settings Management**: Configure server addresses, passwords, and MQTT settings
+- **Демонстрация экрана**: передача рабочего стола удаленным клиентам в реальном времени
+- **Удаленное управление**: управление мышью и клавиатурой удаленного компьютера
+- **Поддержка нескольких клиентов**: одновременное подключение нескольких клиентов к одному серверу
+- **Безопасная коммуникация**: использование MQTT с аутентификацией
+- **Синхронизация курсора**: передача позиции и типа курсора в реальном времени
+- **Управление клавиатурой**: поддержка обычных и специальных клавиш
+- **Управление мышью**: перемещение, клики, прокрутка, перетаскивание
+- **Адресная книга**: сохранение и управление частыми подключениями
+- **Управление настройками**: параметры сервера, пароля и MQTT
 
-## Architecture
+## Архитектура
 
-The application consists of two main components:
+Приложение состоит из двух основных компонентов:
 
-1. **Server (ScreenShareServer)**: Captures the screen and shares it with connected clients. It also receives and processes remote control commands from clients.
+1. **Сервер (`ScreenShareServer`)**: захватывает экран, отправляет кадры клиентам и обрабатывает команды удаленного управления.
+2. **Клиент (`ScreenShareClient`)**: подключается к серверу, отображает экран и отправляет события мыши/клавиатуры.
 
-2. **Client (ScreenShareClient)**: Connects to a server, displays the shared screen, and sends user input (mouse/keyboard) back to the server.
+### Протокол обмена
 
-### Communication Protocol
+Для взаимодействия используется MQTT (Message Queuing Telemetry Transport).
 
-The application uses MQTT (Message Queuing Telemetry Transport) protocol for communication between server and client:
+- **Топики сервера**:
+  - `server/status`: изменения состояния сервера
+  - `server/size`: запрос размера экрана
+  - `server/update/first`: первый кадр
+  - `server/update/next`: последующие кадры
+  - `server/keyboard/keypress`: нажатия клавиш
+  - `server/mouse/*`: события мыши (позиция, клики, движение, колесо)
 
-- **Server Topics**:
-  - `server/status`: Server status updates
-  - `server/size`: Screen size requests
-  - `server/update/first`: First screen frame
-  - `server/update/next`: Subsequent screen frames
-  - `server/keyboard/keypress`: Keyboard input
-  - `server/mouse/*`: Mouse events (position, clicks, movement, wheel)
+- **Топики клиента**:
+  - `client/status`: изменения состояния клиента
+  - `client/size`: информация о размере экрана
+  - `client/update/first`: первый кадр
+  - `client/update/next`: последующие кадры
+  - `client/mouse/position`: обновления позиции курсора
 
-- **Client Topics**:
-  - `client/status`: Client status updates
-  - `client/size`: Screen size information
-  - `client/update/first`: First screen frame
-  - `client/update/next`: Subsequent screen frames
-  - `client/mouse/position`: Mouse position updates
+## Установка
 
-## Installation
+### Требования
 
-### Prerequisites
+- Python 3.8 и выше
+- Windows (используются API Win32)
+- MQTT-брокер (например, Mosquitto, HiveMQ)
 
-- Python 3.8 or higher
-- Windows OS (due to win32 API usage)
-- MQTT Broker (e.g., Mosquitto, HiveMQ)
-
-### Required Libraries
+### Необходимые библиотеки
 
 ```bash
 pip install PyQt6 opencv-python paho-mqtt pyautogui pyperclip mss pynput numpy
 ```
 
-### Setup
+### Настройка
 
-1. Clone the repository:
+1. Клонируйте репозиторий:
+
 ```bash
 git clone https://github.com/yourusername/pyStudyFlash.git
 cd pyStudyFlash
 ```
 
-2. Install dependencies:
+2. Установите зависимости:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Configure MQTT settings in `sets/settings.ini`:
+3. Настройте MQTT в `sets/settings.ini`:
+
 ```ini
 [General]
 server_address=your_email@example.com
@@ -76,93 +78,485 @@ server_password=your_password
 mqtt_address=your_mqtt_broker_address
 mqtt_port=1883
 mqtt_timeout=60
+mqtt_username=
+mqtt_password=
+mqtt_transport=tcp
+mqtt_use_tls=false
+mqtt_tls_insecure=false
+mqtt_ws_path=/mqtt
 ```
 
-## Usage
+### Установка MQTT брокера (Mosquitto)
 
-### Starting the Server
+Вариант 1: Windows
 
-1. Run the main application:
+1. Скачайте Mosquitto с официального сайта: `https://mosquitto.org/download/`.
+2. Установите как Windows Service (службу).
+3. Проверьте, что служба запущена:
+
+```powershell
+Get-Service mosquitto
+```
+
+Вариант 2: Ubuntu/Debian
+
+```bash
+sudo apt update
+sudo apt install -y mosquitto mosquitto-clients
+sudo systemctl enable mosquitto
+sudo systemctl start mosquitto
+sudo systemctl status mosquitto
+```
+
+### Добавление пользователя и пароля
+
+Windows (пример пути установки):
+
+```powershell
+New-Item -Path "C:\mosquitto" -ItemType Directory -Force
+& "C:\Program Files\mosquitto\mosquitto_passwd.exe" -c "C:\mosquitto\passwd" pyflash
+# Важно для службы: дайте SYSTEM право чтения файла паролей
+icacls "C:\mosquitto\passwd" /inheritance:e
+icacls "C:\mosquitto\passwd" /grant "SYSTEM:(R)"
+```
+
+Linux:
+
+```bash
+sudo mosquitto_passwd -c /etc/mosquitto/passwd pyflash
+```
+
+### Базовый безопасный `mosquitto.conf`
+
+Минимум для локальной сети (TCP, логин/пароль), Linux:
+
+```conf
+per_listener_settings true
+
+listener 1883 0.0.0.0
+protocol mqtt
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+```
+
+Минимум для локальной сети (TCP, логин/пароль), Windows:
+
+```conf
+per_listener_settings true
+
+listener 1883 0.0.0.0
+protocol mqtt
+allow_anonymous false
+password_file C:\mosquitto\passwd
+```
+
+Перезапуск брокера после изменений:
+
+Windows:
+
+```powershell
+Restart-Service mosquitto
+```
+
+Linux:
+
+```bash
+sudo systemctl restart mosquitto
+```
+
+### Доступ из интернета: что нужно сделать
+
+1. Дайте ПК с брокером постоянный локальный IP (DHCP reservation), например `192.168.0.66`.
+2. Настройте проброс портов на роутере (NAT/PAT):
+   - Рекомендуется: внешний `8883` -> `192.168.0.66:8883` (MQTT over TLS).
+   - Опционально: внешний `443` -> `192.168.0.66:443` (MQTT over WSS/WebSockets TLS).
+   - Не рекомендуется открывать наружу `1883` без TLS.
+3. Откройте входящие порты в firewall ОС.
+4. Используйте внешний IP или DDNS-домен в `mqtt_address`.
+5. Если CG-NAT у провайдера, проброс портов может не работать; тогда нужен VPS/VPN/reverse tunnel.
+
+#### Какие порты пробрасывать
+
+| Сценарий | Внешний порт | Внутренний адрес:порт | Протокол | Рекомендация |
+|---|---:|---|---|---|
+| MQTT TCP без TLS (только LAN/тест) | 1883 | `192.168.0.66:1883` | TCP | Не открывать в интернет |
+| MQTT TCP + TLS | 8883 | `192.168.0.66:8883` | TCP | Основной вариант для интернета |
+| MQTT over WebSockets + TLS | 443 | `192.168.0.66:443` | TCP | Удобно, если 8883 блокируется |
+
+#### Открытие портов в firewall
+
+Windows (PowerShell от администратора):
+
+```powershell
+New-NetFirewallRule -DisplayName "MQTT TLS 8883" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8883
+New-NetFirewallRule -DisplayName "MQTT WSS 443" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 443
+```
+
+Ubuntu/Debian (UFW):
+
+```bash
+sudo ufw allow 8883/tcp
+sudo ufw allow 443/tcp
+sudo ufw reload
+```
+
+#### Проверка, что брокер доступен из интернета
+
+Из внешней сети (не из той же LAN) проверьте порт:
+
+```powershell
+Test-NetConnection your-ddns-name.example.org -Port 8883
+```
+
+Проверьте подключение MQTT клиентом:
+
+```bash
+mosquitto_sub -h your-ddns-name.example.org -p 8883 -u pyflash -P "strong_password" -t "test/topic" --cafile ca.crt
+```
+
+### Конфиг для интернета (рекомендуется TLS)
+
+Пример MQTT over TLS:
+
+```conf
+per_listener_settings true
+
+listener 8883 0.0.0.0
+protocol mqtt
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+
+cafile /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/server.crt
+keyfile /etc/mosquitto/certs/server.key
+```
+
+Пример MQTT over WebSockets TLS:
+
+```conf
+per_listener_settings true
+
+listener 443 0.0.0.0
+protocol websockets
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+
+cafile /etc/mosquitto/certs/ca.crt
+certfile /etc/mosquitto/certs/server.crt
+keyfile /etc/mosquitto/certs/server.key
+```
+
+### Подробно про параметры `settings.ini`
+
+`server_address`
+
+- Идентификатор сервера в вашем приложении (используется в префиксе топиков).
+- Должен совпадать у сервера и клиентов для одной сессии.
+
+`server_password`
+
+- Часть topic-prefix в приложении.
+- Это не пароль MQTT брокера.
+- Должен совпадать у сервера и клиентов.
+
+`mqtt_address`
+
+- Адрес MQTT брокера: домен или IP.
+- Для интернета указывайте внешний IP или DDNS-имя.
+
+`mqtt_port`
+
+- Типовые значения:
+  - `1883` - MQTT TCP без TLS.
+  - `8883` - MQTT TCP с TLS.
+  - `8080/8083` - MQTT over WebSockets.
+  - `443` - MQTT over WSS (рекомендуется для интернета).
+
+`mqtt_timeout`
+
+- Таймаут подключения в секундах.
+- Обычно `60`.
+
+`mqtt_username` / `mqtt_password`
+
+- Учетные данные пользователя брокера (из `mosquitto_passwd`).
+- Если брокер требует авторизацию, поля обязательны.
+
+`mqtt_transport`
+
+- `tcp` для классического MQTT.
+- `websockets` для MQTT over WS/WSS.
+
+`mqtt_use_tls`
+
+- `true` включает TLS.
+- Для интернета рекомендуется `true`.
+
+`mqtt_tls_insecure`
+
+- `true` отключает строгую проверку сертификата.
+- Используйте только для теста.
+- Для продакшена должно быть `false`.
+
+`mqtt_ws_path`
+
+- Путь для WebSockets подключения.
+- Обычно `/mqtt`, но зависит от конфигурации брокера/прокси.
+
+### Примеры `settings.ini`
+
+Локальная сеть, TCP без TLS:
+
+```ini
+[General]
+server_address=teacher@example.com
+server_password=group1
+mqtt_address=192.168.0.66
+mqtt_port=1883
+mqtt_timeout=60
+mqtt_username=pyflash
+mqtt_password=strong_password
+mqtt_transport=tcp
+mqtt_use_tls=false
+mqtt_tls_insecure=false
+mqtt_ws_path=/mqtt
+```
+
+Интернет, TCP + TLS:
+
+```ini
+[General]
+server_address=teacher@example.com
+server_password=group1
+mqtt_address=your-ddns-name.example.org
+mqtt_port=8883
+mqtt_timeout=60
+mqtt_username=pyflash
+mqtt_password=strong_password
+mqtt_transport=tcp
+mqtt_use_tls=true
+mqtt_tls_insecure=false
+mqtt_ws_path=/mqtt
+```
+
+Интернет, WebSockets + TLS:
+
+```ini
+[General]
+server_address=teacher@example.com
+server_password=group1
+mqtt_address=your-ddns-name.example.org
+mqtt_port=443
+mqtt_timeout=60
+mqtt_username=pyflash
+mqtt_password=strong_password
+mqtt_transport=websockets
+mqtt_use_tls=true
+mqtt_tls_insecure=false
+mqtt_ws_path=/mqtt
+```
+
+### Проверка подключения
+
+В приложении:
+
+1. Откройте `Меню -> Настройки -> MQTT`.
+2. Нажмите `Проверить MQTT подключение`.
+3. После успешного теста нажмите `Сохранить`.
+
+## Использование
+
+### Запуск в режиме сервера
+
+1. Запустите приложение:
+
 ```bash
 python pystudyflash.py
 ```
 
-2. Click "Старт доступ" (Start Access) to begin sharing your screen
+2. Нажмите **"Старт доступ"**, чтобы начать трансляцию экрана.
 
-### Connecting as a Client
+### Подключение в режиме клиента
 
-1. Run the main application:
+1. Запустите приложение:
+
 ```bash
 python pystudyflash.py
 ```
 
-2. Enter the server address in the input field
-3. Click "Подключиться" (Connect) to connect to the server
+2. Введите адрес сервера в поле ввода.
+3. Нажмите **"Подключиться"**.
 
-### Configuration
+### Конфигурация
 
-- **Settings**: Access through the menu (☰) → "Настройки" (Settings)
-- **Address Book**: Save and manage server connections through "Адресная книга" (Address Book)
+- **Настройки**: меню (`☰`) -> **"Настройки"**
+- **Адресная книга**: меню (`☰`) -> **"Адресная книга"**
 
-## Security
+## Безопасность
 
-- Password-protected server access
-- MQTT authentication
-- Encrypted communication (when using TLS-enabled MQTT brokers)
+- Доступ к серверу по паролю
+- Аутентификация MQTT
+- Шифрование при использовании MQTT-брокера с TLS
 
-## Project Structure
+## Структура проекта
 
-```
+```text
 pyStudyFlash/
-├── pystudyflash.py     # Main application entry point
-├── server.py           # Screen sharing server implementation
-├── client.py           # Screen sharing client implementation
-├── cursor.py           # Mouse cursor handling
-├── classes/            # Utility classes
-│   ├── get_cursor.py   # System cursor detection
-│   └── timer_server.py # Timer implementation
-├── cursors/            # Cursor image files
-├── sets/               # Configuration files
-├── util/               # Utility scripts
-└── docs/               # Documentation files
+|-- pystudyflash.py     # Точка входа приложения
+|-- server.py           # Логика сервера демонстрации экрана
+|-- client.py           # Логика клиента
+|-- cursor.py           # Работа с курсором
+|-- classes/            # Вспомогательные классы
+|   |-- get_cursor.py   # Определение системного курсора
+|   `-- timer_server.py # Таймер
+|-- cursors/            # PNG-изображения курсоров
+|-- sets/               # Файлы конфигурации
+|-- util/               # Вспомогательные скрипты
+`-- docs/               # Документация
 ```
 
-## Technical Details
+## Технические детали
 
-### Screen Capture and Transmission
+### Захват и передача экрана
 
-1. The server captures the screen using `mss` library
-2. Images are compressed using zlib and base64 encoded
-3. Frame differencing is used to reduce bandwidth (XOR encoding)
-4. Images are transmitted via MQTT messages
+1. Сервер захватывает экран через `mss`.
+2. Кадры сжимаются (`zlib`) и кодируются (`base64`).
+3. Для снижения трафика используется передача различий между кадрами (XOR).
+4. Данные отправляются через MQTT.
 
-### Remote Control
+### Удаленное управление
 
-1. Mouse events are captured on the client and sent to the server
-2. Keyboard events are processed and simulated on the server
-3. Cursor position synchronization between client and server
-4. Special key combinations handling (Ctrl, Alt, Shift)
+1. Клиент отправляет события мыши на сервер.
+2. Сервер принимает и эмулирует клавиатуру/мышь.
+3. Поддерживается синхронизация курсора.
+4. Обрабатываются сочетания специальных клавиш (Ctrl, Alt, Shift и т.д.).
 
-### UI Components
+### Интерфейс
 
-- PyQt6 for the graphical interface
-- MDI (Multiple Document Interface) for multiple client windows
-- Toolbar with connection controls
-- Settings dialog for configuration
-- Address book for connection management
+- Графический интерфейс на PyQt6
+- MDI (несколько окон клиентов одновременно)
+- Панель инструментов управления подключениями
+- Диалог настроек
+- Адресная книга
 
-## Contributing
+## Вклад в проект
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+1. Сделайте fork репозитория.
+2. Создайте ветку для изменений.
+3. Закоммитьте изменения.
+4. Отправьте ветку в удаленный репозиторий.
+5. Создайте Pull Request.
 
-## License
+## Лицензия
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Проект распространяется по лицензии MIT. Подробности в файле `LICENSE`.
 
-## Author
+## Автор
 
-pyStudyFlash was developed as a screen sharing and remote control solution for educational and collaborative purposes.
+pyStudyFlash разработан как решение для демонстрации экрана и удаленного управления в образовательных и совместных сценариях работы.
+
+## Сборка установочных пакетов для Windows
+
+В репозитории добавлены скрипты для сборки дистрибутива и установщика.
+
+### 1. Сборка дистрибутива (PyInstaller)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_dist.ps1
+```
+
+Результат:
+
+- `dist\pyStudyFlash\pyStudyFlash.exe`
+
+### 2. Сборка `Setup.exe` (Inno Setup)
+
+Сначала установите **Inno Setup 6**, 
+
+На Windows проще всего так:
+
+
+Скачайте установщик с официального сайта: https://jrsoftware.org/isdl.php
+Запустите .exe и установите с настройками по умолчанию (Next -> Install).
+Проверьте, что появился компилятор ISCC.exe:
+обычно: C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+или: C:\Program Files\Inno Setup 6\ISCC.exe
+Проверка в PowerShell:
+
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /?
+После этого в вашем проекте можно запускать:
+
+powershell -ExecutionPolicy Bypass -File .\scripts\build_setup.ps1 -AppVersion 1.0.0
+Если путь нестандартный, передайте его явно:
+
+powershell -ExecutionPolicy Bypass -File .\scripts\build_setup.ps1 -AppVersion 1.0.0 -IsccPath "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+
+Результат:
+
+- `installer\output\pyStudyFlash-setup-1.0.0.exe` (версия зависит от `-AppVersion`)
+
+### Сборка одной командой
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_all.ps1 -AppVersion 1.0.0
+```
+
+### Где хранятся данные установленного приложения
+
+В установленной версии записываемые файлы находятся в:
+
+- `%APPDATA%\pyStudyFlash\settings.ini`
+- `%APPDATA%\pyStudyFlash\address_book`
+
+## Настройка MQTT через интерфейс (работа через интернет)
+
+Начиная с текущей версии MQTT можно полностью настроить из интерфейса программы:
+
+1. Откройте `Меню -> Настройки -> MQTT`.
+2. Заполните параметры подключения:
+   - `Адрес` - домен или IP MQTT брокера.
+   - `Порт` - например `1883`, `8883`, `8080`, `8083` или `443`.
+   - `Таймаут` - обычно `60`.
+   - `Транспорт`:
+     - `TCP` для обычного MQTT.
+     - `WebSockets` для MQTT over WS/WSS.
+   - `Пользователь` / `Пароль` - если брокер требует авторизацию.
+   - `Использовать TLS` - включайте для безопасного подключения через интернет.
+   - `Разрешить недоверенный сертификат` - только для тестовой среды.
+   - `WebSocket path` - обычно `/mqtt` (зависит от брокера).
+3. Нажмите `Проверить MQTT подключение`.
+4. Нажмите `Сохранить`.
+
+Эти параметры используются:
+
+- при запуске локального сервера (`Старт доступ`);
+- при подключении клиента (`Подключиться`);
+- при открытии окна просмотра клиента из серверного окна.
+
+### Адресная книга и MQTT
+
+В записях адресной книги теперь можно хранить не только `MQTT сервер/порт/таймаут`, но и:
+
+- `MQTT пользователь`
+- `MQTT пароль`
+- `MQTT транспорт` (`tcp` или `websockets`)
+- `MQTT TLS` (`true/false`)
+- `MQTT TLS insecure` (`true/false`)
+- `MQTT WS path`
+
+Логика применения:
+
+- если поле в записи заполнено — используется значение из записи;
+- если поле пустое (`Из настроек`) — используется значение из `Меню -> Настройки -> MQTT`.
+
+### Примеры интернет-настроек
+
+- MQTT + TLS:
+  - Транспорт: `TCP`
+  - Порт: `8883`
+  - TLS: `включен`
+- MQTT over WSS:
+  - Транспорт: `WebSockets`
+  - Порт: `443`
+  - TLS: `включен`
+  - WebSocket path: чаще всего `/mqtt`

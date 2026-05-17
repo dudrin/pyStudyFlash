@@ -28,6 +28,7 @@ Thumbs.db
 
 # Output
 output/
+installer/output/
 
 # Configuration
 sets/address_book

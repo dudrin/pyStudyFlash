@@ -1,5 +1,4 @@
 ﻿import pyautogui
-import pyperclip
 from PyQt6 import QtCore
 from PyQt6.QtCore import QTimer, Qt, QEvent
 from PyQt6.QtGui import QKeySequence, QCursor, QShortcut
@@ -200,6 +199,12 @@ class ScreenShareServer(QMainWindow):
         self.mqtt_timeout = None
         self.mqtt_address = None
         self.mqtt_port = None
+        self.mqtt_username = ''
+        self.mqtt_password = ''
+        self.mqtt_transport = 'tcp'
+        self.mqtt_use_tls = False
+        self.mqtt_tls_insecure = False
+        self.mqtt_ws_path = '/mqtt'
         self.server_password, self.server_address, self.mqtt_timeout, self.mqtt_address, self.mqtt_port = None, None, None, None, None
         self.connect_mqtt = False  # MQTT connection flag
         self.monitor = 0  # all monitors
@@ -211,6 +216,7 @@ class ScreenShareServer(QMainWindow):
         self.mouse_move_on_server = False
         self.mouse_released = False  # Tracks whether the left mouse button is released
         self.mouse_move = False  # Indicates that the client is moving the mouse
+        self.mouse_shift_active = False  # Shift-модификатор для remote drag/click
         self.timer_block_mouse_client = MyTimer(5.0, self.on_timer)  # Timer to block client control when local user moves the mouse
         self.listener = mouse_move.Listener(on_move=self.on_move)
         self.listener.start()
@@ -220,7 +226,7 @@ class ScreenShareServer(QMainWindow):
 
         self.setMouseTracking(True)
 
-        self.mouse_label_x, self.mouse_label_y = -1, -1  # Р’С‹РІРѕРґРёРј РїРѕР·РёС†РёСЋ РєСѓСЂСЃРѕСЂР° РјС‹С€Рё Р·Р° СЌРєСЂР°РЅ
+        self.mouse_label_x, self.mouse_label_y = -1, -1  # Выводим позицию курсора мыши за экран
 
         self.my_id = str(uuid.uuid4()) + str(time.time())
         print("Client Id = " + self.my_id)
@@ -233,7 +239,7 @@ class ScreenShareServer(QMainWindow):
         self.client_windows = {}
         self.client_viewers = {}
         self.controller_id = None
-        self.controller_button_group = QButtonGroup()  # Р“СЂСѓРїРїР° СЂР°РґРёРѕРєРЅРѕРїРѕРє РґР»СЏ РІС‹Р±РѕСЂР° РєРѕРЅС‚СЂРѕР»Р»РµСЂР°
+        self.controller_button_group = QButtonGroup()  # Группа радиокнопок для выбора контроллера
         self.controller_button_group.buttonClicked.connect(self._on_controller_radio_clicked)
         
         # Initialize UI components
@@ -276,7 +282,7 @@ class ScreenShareServer(QMainWindow):
         return suffix
 
     def reset_session_state(self):
-        """РџРѕР»РЅС‹Р№ СЃР±СЂРѕСЃ СЃРѕСЃС‚РѕСЏРЅРёСЏ СЃРµСЃСЃРёРё СЃРµСЂРІРµСЂР°"""
+        """Полный сброс состояния сессии сервера"""
         print("Resetting server session state")
         
         self.quit = False
@@ -287,12 +293,13 @@ class ScreenShareServer(QMainWindow):
         self.mouse_released = False
         self.mouse_move = False
         self.mouse_move_on_server = False
+        self._release_shift_modifier()
         
-        # РћСЃС‚Р°РЅР°РІР»РёРІР°РµРј С‚Р°Р№РјРµСЂ Р±Р»РѕРєРёСЂРѕРІРєРё РјС‹С€Рё
+        # Останавливаем таймер блокировки мыши
         if hasattr(self, 'timer_block_mouse_client') and self.timer_block_mouse_client is not None:
             self.timer_block_mouse_client.stop()
             
-        # РћС‡РёС‰Р°РµРј РІСЃРµ РѕРєРЅР° РїСЂРѕСЃРјРѕС‚СЂР° РєР»РёРµРЅС‚РѕРІ
+        # Очищаем все окна просмотра клиентов
         for viewer_id, viewer_info in list(self.client_viewers.items()):
             window = viewer_info.get('window')
             if window is not None:
@@ -302,7 +309,7 @@ class ScreenShareServer(QMainWindow):
                     pass
         self.client_viewers.clear()
         
-        # РЎР±СЂР°СЃС‹РІР°РµРј СЃС‚Р°С‚СѓСЃ СЃРµСЂРІРµСЂР°
+        # Сбрасываем статус сервера
         self.server_status = 'wait'
         self.controller_id = None
         
@@ -317,17 +324,33 @@ class ScreenShareServer(QMainWindow):
                 self.timer_block_mouse_client.start()
         self.mouse_move = False
 
-    def on_timer(self):  # РЎСЂР°Р±РѕС‚Р°Р» С‚Р°Р№РјРµСЂ - Р±Р»РѕРєРёСЂРѕРІРєР° СѓРїСЂР°РІР»РµРЅРёСЏ РјС‹С€СЊСЋ РЅР° СЃРµСЂРІРµСЂРµ РґР»СЏ РєР»РёРµРЅС‚Р° СЃРЅСЏС‚Р°
-        # print('РЎСЂР°Р±РѕС‚Р°Р» С‚Р°Р№РјРµСЂ', time.time())
+    def on_timer(self):  # Сработал таймер - блокировка управления мышью на сервере для клиента снята
+        # print('Сработал таймер', time.time())
         self.timer_block_mouse_client.stop()
-        self.mouse_move_on_server = False  # РљР»РёРµРЅС‚Сѓ СЂР°Р·СЂРµС€РµРЅРѕ СѓРїСЂР°РІР»СЏС‚СЊ РјС‹С€СЊСЋ СЃРµСЂРІРµСЂР°
+        self.mouse_move_on_server = False  # Клиенту разрешено управлять мышью сервера
 
-    def on_connect(self, client, userdata, flags, rc):  # РЎРѕР±С‹С‚РёРµ РїРѕРґРєР»СЋС‡РµРЅРёСЏ Рє MQTT СЃРµСЂРІРµСЂСѓ
+    def _release_shift_modifier(self):
+        if not self.mouse_shift_active:
+            return
+        try:
+            self.keyboard.release(Key.shift)
+        except Exception:
+            pass
+        self.mouse_shift_active = False
+
+    def _parse_mouse_payload(self, payload):
+        parts = payload.split('|')
+        coords = parts[0].strip().strip('()')
+        x_text, y_text = [value.strip() for value in coords.split(',', 1)]
+        modifiers = {item.strip().lower() for item in parts[1:] if item.strip()}
+        return int(x_text), int(y_text), modifiers
+
+    def on_connect(self, client, userdata, flags, rc):  # Событие подключения к MQTT серверу
         print("Connected flags " + str(flags) + " ,result code=" + str(rc))
         if rc == 0:
-            self.connect_mqtt = True  # Р•СЃС‚СЊ РїРѕРґРєР»СЋС‡РµРЅРёРµ Рє MQTT СЃРµСЂРІРµСЂСѓ
+            self.connect_mqtt = True  # Есть подключение к MQTT серверу
             
-            # РљР РРўРР§РќРћ: РћС‡РёС‰Р°РµРј СЃС‚Р°СЂС‹С… РєР»РёРµРЅС‚РѕРІ РїСЂРё РїРµСЂРµРїРѕРґРєР»СЋС‡РµРЅРёРё СЃРµСЂРІРµСЂР°
+            # КРИТИЧНО: Очищаем старых клиентов при переподключении сервера
             print(f"[DEBUG] Clearing old clients on server reconnect - current clients: {len(self.clients)}")
             if self.clients:
                 old_clients = list(self.clients.keys())
@@ -336,41 +359,93 @@ class ScreenShareServer(QMainWindow):
                     self.unregister_client(client_id)
                 print(f"[DEBUG] Cleared {len(old_clients)} old clients")
             
-            # РЎР±СЂР°СЃС‹РІР°РµРј СЃРѕСЃС‚РѕСЏРЅРёРµ РєРѕРЅС‚СЂРѕР»Р»РµСЂР°
+            # Сбрасываем состояние контроллера
             self.controller_id = None
             self.server_status = 'wait'
             print("[DEBUG] Server state reset - ready for new clients")
         else:
             self.connect_mqtt = False
 
-    def on_disconnect(self, client, userdata, rc, properties=None):  # РЎРѕР±С‹С‚РёРµ РѕС‚РєР»СЋС‡РµРЅРёСЏ РѕС‚ MQTT СЃРµСЂРІРµСЂР°
-        """РћР±СЂР°Р±РѕС‚С‡РёРє РѕС‚РєР»СЋС‡РµРЅРёСЏ СЃРµСЂРІРµСЂР° РѕС‚ MQTT Р±СЂРѕРєРµСЂР°"""
+    def on_disconnect(self, client, userdata, rc, properties=None):  # Событие отключения от MQTT сервера
+        """Обработчик отключения сервера от MQTT брокера"""
         was_connected = self.connect_mqtt
         self.connect_mqtt = False
+        self._release_shift_modifier()
         
         if rc == 0:
             print('Server cleanly disconnected from MQTT broker')
         else:
             print(f'Server unexpectedly disconnected from MQTT broker - code: {rc}')
             
-        # РћС‡РёС‰Р°РµРј СЃРѕСЃС‚РѕСЏРЅРёРµ РєР»РёРµРЅС‚РѕРІ РїСЂРё РѕС‚РєР»СЋС‡РµРЅРёРё СЃРµСЂРІРµСЂР°
+        # Очищаем состояние клиентов при отключении сервера
         if was_connected:
             print("Cleaning up client connections after server disconnect")
             for client_id, info in list(self.clients.items()):
                 info['status'] = 'Server disconnected'
                 self.update_client_window(client_id)
                 
-        # РћР±РЅРѕРІР»СЏРµРј СЃС‚Р°С‚СѓСЃ СЃРµСЂРІРµСЂР°
+        # Обновляем статус сервера
         self.server_status = 'wait'
 
-    def on_message(self, client, userdata, message):  # РћР±СЂР°Р±РѕС‚РєР° СЃРѕРѕР±С‰РµРЅРёР№ РєР»РёРµРЅС‚РѕРІ
-        """РћР±СЂР°Р±РѕС‚РєР° СЃРѕРѕР±С‰РµРЅРёР№ СЃ РїСЂРµС„РёРєСЃР°РјРё С‚РѕРїРёРєРѕРІ РґР»СЏ РёР·РѕР»СЏС†РёРё СЃРµСЂРІРµСЂРѕРІ"""
+    def _resolve_keyboard_key(self, key_name):
+        key_name = (key_name or '').strip().lower()
+        aliases = {
+            'return': 'enter',
+            'pgdown': 'page_down',
+            'pgup': 'page_up',
+            'numlock': 'num_lock',
+            'plus': '+',
+        }
+        key_name = aliases.get(key_name, key_name)
+        if len(key_name) == 1:
+            return key_name
+        return getattr(Key, key_name, None)
+
+    def _send_keyboard_sequence(self, key_sequence):
+        keys = [key for key in key_sequence.split('+') if key]
+        if not keys:
+            return
+
+        resolved = [self._resolve_keyboard_key(key) for key in keys]
+        if any(key is None for key in resolved):
+            print(f"Unknown keyboard sequence: {key_sequence}")
+            return
+
+        try:
+            if len(resolved) == 1:
+                key = resolved[0]
+                if isinstance(key, str):
+                    self.keyboard.type(key)
+                else:
+                    self.keyboard.press(key)
+                    self.keyboard.release(key)
+                return
+
+            for key in resolved:
+                self.keyboard.press(key)
+            time.sleep(0.03)
+            for key in reversed(resolved):
+                self.keyboard.release(key)
+        except Exception as exc:
+            print(f"Keyboard input error for '{key_sequence}': {exc}")
+        finally:
+            for modifier in (
+                    Key.ctrl, Key.ctrl_l, Key.ctrl_r,
+                    Key.alt, Key.alt_l, Key.alt_r,
+                    Key.shift, Key.shift_l, Key.shift_r):
+                try:
+                    self.keyboard.release(modifier)
+                except Exception:
+                    pass
+
+    def on_message(self, client, userdata, message):  # Обработка сообщений клиентов
+        """Обработка сообщений с префиксами топиков для изоляции серверов"""
         topic = message.topic
         _hotpath_log(f"Server received message on topic: {topic}")
         
-        # РћР‘Р РђР‘РћРўРљРђ РЎ РџР Р•Р¤РРљРЎРђРњР - РљРћРњР‘РРќРР РЈР•Рњ РћР РР“РРќРђР›Р¬РќРЈР® Р›РћР“РРљРЈ РЎ РџР Р•Р¤РРљРЎРђРњР
+        # ОБРАБОТКА С ПРЕФИКСАМИ - КОМБИНИРУЕМ ОРИГИНАЛЬНУЮ ЛОГИКУ С ПРЕФИКСАМИ
         
-        # РћР±СЂР°Р±РѕС‚РєР° СЂРµРіРёСЃС‚СЂР°С†РёРё РєР»РёРµРЅС‚Р°
+        # Обработка регистрации клиента
         if topic == self.build_topic('server/status'):
             payload = message.payload.decode('utf-8')
             if payload.startswith('register|'):
@@ -379,6 +454,13 @@ class ScreenShareServer(QMainWindow):
                 display_name = parts[2] if len(parts) > 2 else client_id
                 print(f"Registering client - ID: '{client_id}', Name: '{display_name}'")
                 self.register_client(client_id, display_name)
+                return
+            if payload.startswith('disconnect|'):
+                parts = payload.split('|', 1)
+                client_id = parts[1] if len(parts) > 1 else ''
+                if client_id:
+                    print(f"LWT disconnect from client: {client_id}")
+                    self.unregister_client(client_id)
                 return
         
         if topic == self.build_topic('server/size'):
@@ -391,61 +473,18 @@ class ScreenShareServer(QMainWindow):
         if topic == self.build_topic('server/keyboard/keypress'):
             key_sequence = message.payload.decode()
             print(topic + " " + str(key_sequence))
-            keys = key_sequence.split('+')
-
-            # Р•СЃР»Рё РєР»СЋС‡ СЃРѕРґРµСЂР¶РёС‚ Р±РѕР»РµРµ РѕРґРЅРѕРіРѕ СЃРёРјРІРѕР»Р°, СЌС‚Рѕ СЃРїРµС†РёР°Р»СЊРЅР°СЏ РєР»Р°РІРёС€Р°
-            if len(keys) == 1 and len(keys[0]) > 1 and not keys[0].lower() == 'plus':
-                if keys[0].lower() == 'plus':
-                    keys[0] = '+'
-                if keys[0].lower() == 'numlock':
-                    keys[0] = 'num_lock'
-                if keys[0].lower() == 'pgdown':
-                    keys[0] = 'page_down'
-                if keys[0].lower() == 'pgup':
-                    keys[0] = 'page_up'
-                if keys[0].lower() == 'return':
-                    keys[0] = 'enter'
-                self.keyboard.press(getattr(Key, keys[0]))
-                self.keyboard.release(getattr(Key, keys[0]))
-            elif '+' in key_sequence:
-                # Р•СЃР»Рё РѕРґРЅРёРј РёР· РєР»СЋС‡РµР№ СЏРІР»СЏРµС‚СЃСЏ 'shift' Рё РµСЃС‚СЊ С‚РѕР»СЊРєРѕ РѕРґРёРЅ РґСЂСѓРіРѕР№ РєР»СЋС‡
-                if 'shift' in keys and len(keys) == 2 and len(keys[1]) == 1 and keys[1].isalpha():
-                    pyperclip.copy(keys[1].upper())
-                    self.keyboard.press(Key.ctrl)
-                    self.keyboard.press('v')
-                    self.keyboard.release('v')
-                    self.keyboard.release(Key.ctrl)
-                else:
-                    for key in keys:
-                        if not keys[1].lower() == 'ctrl_l':
-                            if len(key) > 1:
-                                print(getattr(Key, key))
-                                self.keyboard.press(getattr(Key, key))
-                            else:
-                                self.keyboard.press(key)
-                    time.sleep(0.1)
-                    for key in reversed(keys):
-                        if not keys[1].lower() == 'ctrl_l':
-                            if len(key) > 1:
-                                self.keyboard.release(getattr(Key, key))
-                            else:
-                                self.keyboard.release(key)
-            else:
-                if keys[0].lower() == 'plus':
-                    key_sequence = '+'
-                pyperclip.copy(key_sequence)
-                self.keyboard.press(Key.ctrl)
-                self.keyboard.press('v')
-                self.keyboard.release('v')
-                self.keyboard.release(Key.ctrl)
+            self._send_keyboard_sequence(key_sequence)
         elif topic == self.build_topic('server/keyboard/keyrelease'):
-            pass  # РќРёС‡РµРіРѕ РЅРµ РґРµР»Р°РµРј РїСЂРё РѕС‚РїСѓСЃРєР°РЅРёРё РєР»Р°РІРёС€Рё
+            pass  # Ничего не делаем при отпускании клавиши
 
         if topic == self.build_topic('server/mouse/right_click'):
             x, y = map(int, message.payload.decode()[1:-1].split(', '))
             pyautogui.rightClick(x, y)
         elif topic == self.build_topic('server/mouse/left_click'):
-            x, y = map(int, message.payload.decode()[1:-1].split(', '))
+            x, y, modifiers = self._parse_mouse_payload(message.payload.decode())
+            if 'shift' in modifiers and not self.mouse_shift_active:
+                self.keyboard.press(Key.shift)
+                self.mouse_shift_active = True
             pyautogui.mouseDown(x, y)
         elif topic == self.build_topic('server/mouse/double_click'):
             x, y = map(int, message.payload.decode()[1:-1].split(', '))
@@ -460,6 +499,7 @@ class ScreenShareServer(QMainWindow):
         elif topic == self.build_topic('server/mouse/drag_end'):
             self.mouse_released = True
             pyautogui.mouseUp()
+            self._release_shift_modifier()
 
         if topic == self.build_topic('server/mouse/move'):
             self.mouse_move = True
@@ -478,7 +518,7 @@ class ScreenShareServer(QMainWindow):
                 _hotpath_log("Sent next frame")
 
         if topic == self.build_topic('server/mouse/position'):
-            # РџРѕР»СѓС‡РёС‚Рµ С‚РµРєСѓС‰РµРµ РїРѕР»РѕР¶РµРЅРёРµ РєСѓСЂСЃРѕСЂР° РјС‹С€Рё
+            # Получите текущее положение курсора мыши
             x, y = pyautogui.position()
             cursor_type = get_current_cursor()
             if isinstance(x, (int, float)) and isinstance(y, (int, float)) and isinstance(cursor_type, str):
@@ -509,7 +549,7 @@ class ScreenShareServer(QMainWindow):
             self.unregister_client(client_id)
 
     def _handle_message(self, topic, raw_payload):
-        """РРќРўР•Р“Р РР РћР’РђРќРќР«Р™ РѕР±СЂР°Р±РѕС‚С‡РёРє СЃРѕРѕР±С‰РµРЅРёР№ РЅР° РѕСЃРЅРѕРІРµ util/server_20231123.py"""
+        """ИНТЕГРИРОВАННЫЙ обработчик сообщений на основе util/server_20231123.py"""
         try:
             _hotpath_log(f"Processing message on topic: {topic}")
             client_ref = self.client_mqqt
@@ -517,7 +557,7 @@ class ScreenShareServer(QMainWindow):
                 print("ERROR: No MQTT client reference available")
                 return
                 
-            # РљР РРўРРљРћ: РџСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ Р°РєС‚РёРІРЅС‹С… РєР»РёРµРЅС‚РѕРІ РґР»СЏ СЃРѕР±С‹С‚РёР№ РјС‹С€Рё/РєР»Р°РІРёР°С‚СѓСЂС‹
+            # КРИТИКО: Проверяем наличие активных клиентов для событий мыши/клавиатуры
             mouse_keyboard_topics = [
                 'server/mouse/position', 'server/mouse/label', 'server/mouse/right_click',
                 'server/mouse/left_click', 'server/mouse/double_click', 'server/mouse/wheel',
@@ -528,10 +568,10 @@ class ScreenShareServer(QMainWindow):
             topic_suffix = topic.replace(f"{self.topic_prefix}/", "") if self.topic_prefix else topic
             
             if topic_suffix in mouse_keyboard_topics and not self.has_active_clients():
-                print(f"РџСЂРѕРїСѓСЃРєР°РµРј СЃРѕР±С‹С‚РёРµ {topic_suffix} - РЅРµС‚ Р°РєС‚РёРІРЅС‹С… РєР»РёРµРЅС‚РѕРІ")
+                print(f"Пропускаем событие {topic_suffix} - нет активных клиентов")
                 return
                 
-            # РћР±СЂР°Р±РѕС‚РєР° СЂРµРіРёСЃС‚СЂР°С†РёРё РєР»РёРµРЅС‚Р°
+            # Обработка регистрации клиента
             if topic == self.build_topic('server/status'):
                 payload = raw_payload.decode('utf-8')
                 if payload.startswith('register|'):
@@ -541,8 +581,15 @@ class ScreenShareServer(QMainWindow):
                     print(f"Registering client - ID: '{client_id}', Name: '{display_name}'")
                     self.register_client(client_id, display_name)
                     return
+                if payload.startswith('disconnect|'):
+                    parts = payload.split('|', 1)
+                    client_id = parts[1] if len(parts) > 1 else ''
+                    if client_id:
+                        print(f"LWT disconnect from client: {client_id}")
+                        self.unregister_client(client_id)
+                    return
                     
-            # РРЎРџРћР›Р¬Р—РЈР•Рњ РћР РР“РРќРђР›Р¬РќРЈР® Р›РћР“РРљРЈ РР— util/server_20231123.py
+            # ИСПОЛЬЗУЕМ ОРИГИНАЛЬНУЮ ЛОГИКУ ИЗ util/server_20231123.py
             
             if topic == self.build_topic('server/size'):
                 with mss.mss() as sct:
@@ -553,61 +600,18 @@ class ScreenShareServer(QMainWindow):
             if topic == self.build_topic('server/keyboard/keypress'):
                 key_sequence = raw_payload.decode()
                 print(topic + " " + str(key_sequence))
-                keys = key_sequence.split('+')
-
-                # Р•СЃР»Рё РєР»СЋС‡ СЃРѕРґРµСЂР¶РёС‚ Р±РѕР»РµРµ РѕРґРЅРѕРіРѕ СЃРёРјРІРѕР»Р°, СЌС‚Рѕ СЃРїРµС†РёР°Р»СЊРЅР°СЏ РєР»Р°РІРёС€Р°
-                if len(keys) == 1 and len(keys[0]) > 1 and not keys[0].lower() == 'plus':
-                    if keys[0].lower() == 'plus':
-                        keys[0] = '+'
-                    if keys[0].lower() == 'numlock':
-                        keys[0] = 'num_lock'
-                    if keys[0].lower() == 'pgdown':
-                        keys[0] = 'page_down'
-                    if keys[0].lower() == 'pgup':
-                        keys[0] = 'page_up'
-                    if keys[0].lower() == 'return':
-                        keys[0] = 'enter'
-                    self.keyboard.press(getattr(Key, keys[0]))
-                    self.keyboard.release(getattr(Key, keys[0]))
-                elif '+' in key_sequence:
-                    # Р•СЃР»Рё РѕРґРЅРёРј РёР· РєР»СЋС‡РµР№ СЏРІР»СЏРµС‚СЃСЏ 'shift' Рё РµСЃС‚СЊ С‚РѕР»СЊРєРѕ РѕРґРёРЅ РґСЂСѓРіРѕР№ РєР»СЋС‡, РєРѕС‚РѕСЂС‹Р№ СЏРІР»СЏРµС‚СЃСЏ Р±СѓРєРІРѕР№ РґР»РёРЅРѕР№ 1, РёСЃРїРѕР»СЊР·СѓРµРј РєРѕРїРёСЂРѕРІР°РЅРёРµ Рё РІСЃС‚Р°РІРєСѓ
-                    if 'shift' in keys and len(keys) == 2 and len(keys[1]) == 1 and keys[1].isalpha():
-                        pyperclip.copy(keys[1].upper())
-                        self.keyboard.press(Key.ctrl)
-                        self.keyboard.press('v')
-                        self.keyboard.release('v')
-                        self.keyboard.release(Key.ctrl)
-                    else:
-                        for key in keys:
-                            if not keys[1].lower() == 'ctrl_l':
-                                if len(key) > 1:
-                                    print(getattr(Key, key))
-                                    self.keyboard.press(getattr(Key, key))
-                                else:
-                                    self.keyboard.press(key)
-                        time.sleep(0.1)
-                        for key in reversed(keys):
-                            if not keys[1].lower() == 'ctrl_l':
-                                if len(key) > 1:
-                                    self.keyboard.release(getattr(Key, key))
-                                else:
-                                    self.keyboard.release(key)
-                else:
-                    if keys[0].lower() == 'plus':
-                        key_sequence = '+'
-                    pyperclip.copy(key_sequence)
-                    self.keyboard.press(Key.ctrl)
-                    self.keyboard.press('v')
-                    self.keyboard.release('v')
-                    self.keyboard.release(Key.ctrl)
+                self._send_keyboard_sequence(key_sequence)
             elif topic == self.build_topic('server/keyboard/keyrelease'):
-                pass  # РќРёС‡РµРіРѕ РЅРµ РґРµР»Р°РµРј РїСЂРё РѕС‚РїСѓСЃРєР°РЅРёРё РєР»Р°РІРёС€Рё
+                pass  # Ничего не делаем при отпускании клавиши
 
             if topic == self.build_topic('server/mouse/right_click'):
                 x, y = map(int, raw_payload.decode()[1:-1].split(', '))
                 pyautogui.rightClick(x, y)
             elif topic == self.build_topic('server/mouse/left_click'):
-                x, y = map(int, raw_payload.decode()[1:-1].split(', '))
+                x, y, modifiers = self._parse_mouse_payload(raw_payload.decode())
+                if 'shift' in modifiers and not self.mouse_shift_active:
+                    self.keyboard.press(Key.shift)
+                    self.mouse_shift_active = True
                 pyautogui.mouseDown(x, y)
             elif topic == self.build_topic('server/mouse/double_click'):
                 x, y = map(int, raw_payload.decode()[1:-1].split(', '))
@@ -623,6 +627,7 @@ class ScreenShareServer(QMainWindow):
             elif topic == self.build_topic('server/mouse/drag_end'):
                 self.mouse_released = True
                 pyautogui.mouseUp()
+                self._release_shift_modifier()
 
             if topic == self.build_topic('server/mouse/move'):
                 self.mouse_move = True
@@ -630,11 +635,11 @@ class ScreenShareServer(QMainWindow):
             if topic == self.build_topic('server/update/first'):
                 with mss.mss() as sct:
                     b64img = self.BuildPayload(False)
-                    # РћС‚РїСЂР°РІР»СЏРµРј CONTROLLER-Сѓ РїСЂСЏРјРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ
+                    # Отправляем CONTROLLER-у прямое обновление
                     client_ref.publish(self.build_topic('client/update/first'), b64img)
                     _hotpath_log("Sent first frame to controller")
                     
-                    # РџСѓР±Р»РёРєСѓРµРј С‚РѕС‚ Р¶Рµ РєР°РґСЂ РІ stream РґР»СЏ VIEWER-РѕРІ
+                    # Публикуем тот же кадр в stream для VIEWER-ов
                     if self.has_viewer_clients():
                         client_ref.publish(self.build_topic('client/stream/first'), b64img)
                         print("Broadcasted first frame to viewers")
@@ -642,25 +647,25 @@ class ScreenShareServer(QMainWindow):
             if topic == self.build_topic('server/update/next'):
                 with mss.mss() as sct:
                     b64img = self.BuildPayload()
-                    # РћС‚РїСЂР°РІР»СЏРµРј CONTROLLER-Сѓ РїСЂСЏРјРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ
+                    # Отправляем CONTROLLER-у прямое обновление
                     client_ref.publish(self.build_topic('client/update/next'), b64img)
                     _hotpath_log("Sent next frame to controller")
                     
-                    # РџСѓР±Р»РёРєСѓРµРј С‚РѕС‚ Р¶Рµ РєР°РґСЂ РІ stream РґР»СЏ VIEWER-РѕРІ
+                    # Публикуем тот же кадр в stream для VIEWER-ов
                     if self.has_viewer_clients():
                         client_ref.publish(self.build_topic('client/stream/next'), b64img)
                         print("Broadcasted next frame to viewers")
 
             if topic == self.build_topic('server/mouse/position'):
                 with mss.mss() as sct:
-                    # РџРѕР»СѓС‡РёС‚Рµ С‚РµРєСѓС‰РµРµ РїРѕР»РѕР¶РµРЅРёРµ РєСѓСЂСЃРѕСЂР° РјС‹С€Рё
+                    # Получите текущее положение курсора мыши
                     x, y = pyautogui.position()
-                    # РџРѕР»СѓС‡Р°РµРј С‚РµРєСѓС‰РёР№ С‚РёРї РєСѓСЂСЃРѕСЂР°
+                    # Получаем текущий тип курсора
                     cursor_type = get_current_cursor()
                     if isinstance(x, (int, float)) and isinstance(y, (int, float)) and isinstance(cursor_type, str):
                         client_ref.publish(self.build_topic('client/mouse/position'), str(x) + "|" + str(y) + "|" + cursor_type)
 
-            if topic == self.build_topic('server/mouse/label'):  # РџСЂРµРґРїРѕР»Р°РіР°РµРјС‹Рµ РїРѕР·РёС†РёРё РјС‹С€Рё СЃ РєР»РёРµРЅС‚Р° СѓРїСЂР°РІР»РµРЅРёСЏ РґР»СЏ РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ РєСѓСЂСЃРѕСЂР°
+            if topic == self.build_topic('server/mouse/label'):  # Предполагаемые позиции мыши с клиента управления для отображения курсора
                 str_mouse_position = raw_payload.decode("utf-8")
                 str_list = str_mouse_position.split("|")
                 self.mouse_label_x = int(str_list[0])
@@ -674,7 +679,7 @@ class ScreenShareServer(QMainWindow):
                         client_ref.publish(self.build_topic('client/mouse/position'), str(self.mouse_label_x) + "|" + str(
                             self.mouse_label_y) + "|" + cursor_type + "|next")
                 else:
-                    # РџРѕР»СѓС‡РёС‚Рµ С‚РµРєСѓС‰РµРµ РїРѕР»РѕР¶РµРЅРёРµ РєСѓСЂСЃРѕСЂР° РјС‹С€Рё
+                    # Получите текущее положение курсора мыши
                     # x, y = pyautogui.position()
                     x, y = self.mouse.position
                     cursor_type = get_current_cursor()
@@ -682,7 +687,7 @@ class ScreenShareServer(QMainWindow):
                         client_ref.publish(self.build_topic('client/mouse/position'), str(x) + "|" + str(y) + "|" + cursor_type + "|last")
                 self.mouse_label_x, self.mouse_label_y = -1, -1
                 
-            # РћР±СЂР°Р±РѕС‚РєР° РѕС‚РєР»СЋС‡РµРЅРёСЏ РєР»РёРµРЅС‚Р°
+            # Обработка отключения клиента
             if topic == self.build_topic('server/quit'):
                 client_id = raw_payload.decode('utf-8').strip()
                 print(f"Client disconnect request: {client_id}")
@@ -694,7 +699,7 @@ class ScreenShareServer(QMainWindow):
             traceback.print_exc()
 
     def register_client(self, client_id, display_name):
-        """Р РµРіРёСЃС‚СЂР°С†РёСЏ РєР»РёРµРЅС‚Р° СЃ РїРѕРґРґРµСЂР¶РєРѕР№ РјРЅРѕР¶РµСЃС‚РІРµРЅРЅС‹С… РїРѕРґРєР»СЋС‡РµРЅРёР№"""
+        """Регистрация клиента с поддержкой множественных подключений"""
         if QtCore.QThread.currentThread() != self.thread():
             self._run_on_ui(lambda cid=client_id, name=display_name: self.register_client(cid, name))
             return
@@ -705,15 +710,15 @@ class ScreenShareServer(QMainWindow):
             print(f"[DEBUG] Empty client_id, returning")
             return
             
-        # РљР РРўРР§РќРћ: РџСЂРµРґРѕС‚РІСЂР°С‰Р°РµРј СЃР°РјРѕСЂРµРіРёСЃС‚СЂР°С†РёСЋ СЃРµСЂРІРµСЂР°
+        # КРИТИЧНО: Предотвращаем саморегистрацию сервера
         if client_id == self.my_id:
-            print(f"[DEBUG] вќЊ BLOCKED: Server tried to register itself as client! my_id: {self.my_id}")
+            print(f"[DEBUG] ❌ BLOCKED: Server tried to register itself as client! my_id: {self.my_id}")
             return
             
         display_name = display_name or client_id
         now = time.time()
         
-        # РџСЂРѕРІРµСЂСЏРµРј СЃСѓС‰РµСЃС‚РІРѕРІР°РЅРёРµ РєР»РёРµРЅС‚Р°
+        # Проверяем существование клиента
         existing_info = self.clients.get(client_id)
         is_new_client = existing_info is None
         is_reconnection = existing_info is not None
@@ -721,55 +726,55 @@ class ScreenShareServer(QMainWindow):
         print(f"[DEBUG] Client analysis - is_new: {is_new_client}, is_reconnection: {is_reconnection}")
         
         if is_new_client:
-            # РќРѕРІС‹Р№ РєР»РёРµРЅС‚
+            # Новый клиент
             info = {
                 'name': display_name,
                 'status': 'Connected',
                 'connected_at': now,
                 'last_register_at': now,
-                'role': 'viewer',  # РџРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РІСЃРµ РЅРѕРІС‹Рµ РєР»РёРµРЅС‚С‹ - РЅР°Р±Р»СЋРґР°С‚РµР»Рё
+                'role': 'viewer',  # По умолчанию все новые клиенты - наблюдатели
                 'connection_count': 1
             }
             self.clients[client_id] = info
             
-            # РЎРѕР·РґР°РµРј РѕРєРЅРѕ СѓРїСЂР°РІР»РµРЅРёСЏ РєР»РёРµРЅС‚РѕРј
+            # Создаем окно управления клиентом
             self.create_client_window(client_id, display_name)
-            print(f'рџ“Ґ NEW CLIENT: {display_name} ({client_id})')
+            print(f'📥 NEW CLIENT: {display_name} ({client_id})')
             
         else:
-            # РџРѕРІС‚РѕСЂРЅРѕРµ РїРѕРґРєР»СЋС‡РµРЅРёРµ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµРіРѕ РєР»РёРµРЅС‚Р°
+            # Повторное подключение существующего клиента
             previous_register_at = existing_info.get('last_register_at', 0.0)
             duplicate_burst = (now - previous_register_at) < 1.5
-            existing_info['name'] = display_name  # РћР±РЅРѕРІР»СЏРµРј РёРјСЏ РµСЃР»Рё РёР·РјРµРЅРёР»РѕСЃСЊ
+            existing_info['name'] = display_name  # Обновляем имя если изменилось
             existing_info['status'] = 'Connected'
-            existing_info['connected_at'] = now  # РћР±РЅРѕРІР»СЏРµРј РІСЂРµРјСЏ РїРѕРґРєР»СЋС‡РµРЅРёСЏ
+            existing_info['connected_at'] = now  # Обновляем время подключения
             existing_info['last_register_at'] = now
             existing_info['connection_count'] = existing_info.get('connection_count', 0) + 1
             
-            # РћР±РЅРѕРІР»СЏРµРј РѕРєРЅРѕ СѓРїСЂР°РІР»РµРЅРёСЏ РєР»РёРµРЅС‚РѕРј
+            # Обновляем окно управления клиентом
             self.update_client_window(client_id, display_name)
-            print(f'рџ”„ RECONNECTION: {display_name} ({client_id}) - РїРѕРїС‹С‚РєР° #{existing_info["connection_count"]}')
+            print(f'🔄 RECONNECTION: {display_name} ({client_id}) - попытка #{existing_info["connection_count"]}')
 
             if duplicate_burst:
                 print(f"[DEBUG] Duplicate register burst suppressed for {client_id}")
                 return
             
-        # РљР РРўРР§Р•РЎРљР Р’РђР–РќРћ: РќР°Р·РЅР°С‡РµРЅРёРµ СЂРѕР»РµР№
+        # КРИТИЧЕСКИ ВАЖНО: Назначение ролей
         print(f"[DEBUG] Before role assignment - controller: {self.controller_id}, total clients: {len(self.clients)}")
         self._assign_roles_for_multiple_clients()
         print(f"[DEBUG] After role assignment - controller: {self.controller_id}")
         
-        # Р Р°СЃСЃС‹Р»Р°РµРј РѕР±РЅРѕРІР»РµРЅРЅС‹Рµ СЂРѕР»Рё РІСЃРµРј РєР»РёРµРЅС‚Р°Рј
+        # Рассылаем обновленные роли всем клиентам
         print(f"[DEBUG] Broadcasting roles to all clients")
         self.broadcast_roles()
         
-        # Р’С‹РІРѕРґРёРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ РїРѕРґРєР»СЋС‡РµРЅРёР№
+        # Выводим статистику подключений
         total_clients = len(self.clients)
         controller_name = self.clients.get(self.controller_id, {}).get('name', 'None') if self.controller_id else 'None'
-        print(f'рџ“Љ CLIENTS STATUS: Total={total_clients}, Controller={controller_name}')
+        print(f'📊 CLIENTS STATUS: Total={total_clients}, Controller={controller_name}')
         
     def _assign_roles_for_multiple_clients(self):
-        """РќР°Р·РЅР°С‡РµРЅРёРµ СЂРѕР»РµР№ СЃ РїСЂРёРѕСЂРёС‚РµС‚РѕРј РїРµСЂРІРѕРіРѕ РїРѕРґРєР»СЋС‡РёРІС€РµРіРѕСЃСЏ РєР»РёРµРЅС‚Р°"""
+        """Назначение ролей с приоритетом первого подключившегося клиента"""
         print(f"[DEBUG] _assign_roles_for_multiple_clients called")
         print(f"[DEBUG] Current state - clients: {len(self.clients)}, controller_id: {self.controller_id}")
         
@@ -778,10 +783,10 @@ class ScreenShareServer(QMainWindow):
             self.controller_id = None
             return
             
-        # Р•СЃР»Рё РЅРµС‚ Р°РєС‚РёРІРЅРѕРіРѕ РєРѕРЅС‚СЂРѕР»Р»РµСЂР° РёР»Рё РѕРЅ РѕС‚РєР»СЋС‡РёР»СЃСЏ
+        # Если нет активного контроллера или он отключился
         if not self.controller_id or self.controller_id not in self.clients:
             print(f"[DEBUG] No valid controller, finding earliest client")
-            # РќР°С…РѕРґРёРј СЃР°РјРѕРіРѕ СЂР°РЅРЅРµРіРѕ РєР»РёРµРЅС‚Р° РїРѕ РІСЂРµРјРµРЅРё РїРѕРґРєР»СЋС‡РµРЅРёСЏ
+            # Находим самого раннего клиента по времени подключения
             earliest_client = min(
                 self.clients.items(), 
                 key=lambda item: item[1].get('connected_at', 0)
@@ -790,15 +795,15 @@ class ScreenShareServer(QMainWindow):
             old_controller = self.controller_id
             self.controller_id = earliest_client[0]
             
-            print(f'[DEBUG] рџ‘‘ CONTROLLER ASSIGNMENT: {earliest_client[1].get("name", earliest_client[0])} (first connected)')
+            print(f'[DEBUG] 👑 CONTROLLER ASSIGNMENT: {earliest_client[1].get("name", earliest_client[0])} (first connected)')
             print(f'[DEBUG] Controller changed from {old_controller} to {self.controller_id}')
             
             if old_controller and old_controller != self.controller_id:
-                print(f'[DEBUG] рџ”„ Controller changed from {old_controller} to {self.controller_id}')
+                print(f'[DEBUG] 🔄 Controller changed from {old_controller} to {self.controller_id}')
         else:
             print(f"[DEBUG] Controller {self.controller_id} is still valid")
                 
-        # РЈСЃС‚Р°РЅР°РІР»РёРІР°РµРј СЂРѕР»Рё РІСЃРµС… РєР»РёРµРЅС‚РѕРІ
+        # Устанавливаем роли всех клиентов
         print(f"[DEBUG] Setting roles for all clients:")
         for client_id, info in self.clients.items():
             old_role = info.get('role', 'unknown')
@@ -809,13 +814,13 @@ class ScreenShareServer(QMainWindow):
                 info['role'] = 'viewer'
                 print(f"[DEBUG]   {client_id} -> VIEWER (was {old_role})")
                 
-        # РћР±РЅРѕРІР»СЏРµРј СЃС‚Р°С‚СѓСЃ СЃРµСЂРІРµСЂР°
+        # Обновляем статус сервера
         old_status = self.server_status
         self.server_status = 'control' if self.controller_id else 'wait'
         print(f"[DEBUG] Server status changed from '{old_status}' to '{self.server_status}'")
 
     def unregister_client(self, client_id):
-        """РџРѕР»РЅРѕРµ РѕС‚РєР»СЋС‡РµРЅРёРµ Рё РѕС‡РёСЃС‚РєР° РєР»РёРµРЅС‚Р°"""
+        """Полное отключение и очистка клиента"""
         if QtCore.QThread.currentThread() != self.thread():
             self._run_on_ui(lambda cid=client_id: self.unregister_client(cid))
             return
@@ -829,7 +834,7 @@ class ScreenShareServer(QMainWindow):
         
         print(f'Client disconnecting: {info.get("name", client_id)} ({client_id})')
         
-        # Р—Р°РєСЂС‹РІР°РµРј РѕРєРЅРѕ РїСЂРѕСЃРјРѕС‚СЂР° РєР»РёРµРЅС‚Р°
+        # Закрываем окно просмотра клиента
         viewer_info = self.client_viewers.get(client_id)
         if viewer_info:
             try:
@@ -840,20 +845,20 @@ class ScreenShareServer(QMainWindow):
             except Exception as e:
                 print(f"Error closing viewer window: {e}")
                 
-        # РћС‡РёС‰Р°РµРј СЃРїРёСЃРѕРє РїСЂРѕСЃРјРѕС‚СЂС‰РёРєРѕРІ
+        # Очищаем список просмотрщиков
         self.client_viewers.pop(client_id, None)
                 
-        # РћР±РЅРѕРІР»СЏРµРј СЃС‚Р°С‚СѓСЃ РєР»РёРµРЅС‚Р°
+        # Обновляем статус клиента
         info['status'] = 'Disconnected'
         self.update_client_window(client_id)
         
-        # РћС‚РєР»Р°РґС‹РІР°РµРј СѓРґР°Р»РµРЅРёРµ РѕРєРЅР° РєР»РёРµРЅС‚Р° РЅР° 3 СЃРµРєСѓРЅРґС‹
+        # Откладываем удаление окна клиента на 3 секунды
         QTimer.singleShot(3000, lambda: self.remove_client_window(client_id))
         
-        # РЈРґР°Р»СЏРµРј РєР»РёРµРЅС‚Р° РёР· СЃРїРёСЃРєР°
+        # Удаляем клиента из списка
         self.clients.pop(client_id, None)
         
-        # РџРµСЂРµРЅР°Р·РЅР°С‡Р°РµРј РєРѕРЅС‚СЂРѕР»Р»РµСЂР° РµСЃР»Рё СЌС‚Рѕ Р±С‹Р» С‚РµРєСѓС‰РёР№ РєРѕРЅС‚СЂРѕР»Р»РµСЂ
+        # Переназначаем контроллера если это был текущий контроллер
         if self.controller_id == client_id:
             old_controller = self.controller_id
             self.controller_id = self._next_controller_id(exclude=client_id)
@@ -862,13 +867,14 @@ class ScreenShareServer(QMainWindow):
             else:
                 print('No controller available after disconnection')
                 
-        # РћР±РЅРѕРІР»СЏРµРј СЂРѕР»Рё РІСЃРµС… РѕСЃС‚Р°РІС€РёС…СЃСЏ РєР»РёРµРЅС‚РѕРІ
+        # Обновляем роли всех оставшихся клиентов
         self.broadcast_roles()
+        self._release_shift_modifier()
         
-        # РљР РРўРРљРћ: РћСЃС‚Р°РЅР°РІР»РёРІР°РµРј РѕС‚РїСЂР°РІРєСѓ СЃРѕР±С‹С‚РёР№ РјС‹С€Рё/РєР»Р°РІРёР°С‚СѓСЂС‹ РµСЃР»Рё РЅРµС‚ РєР»РёРµРЅС‚РѕРІ
+        # КРИТИКО: Останавливаем отправку событий мыши/клавиатуры если нет клиентов
         if not self.has_active_clients():
-            print("РќРµС‚ Р°РєС‚РёРІРЅС‹С… РєР»РёРµРЅС‚РѕРІ - РѕСЃС‚Р°РЅР°РІР»РёРІР°РµРј РѕС‚РїСЂР°РІРєСѓ СЃРѕР±С‹С‚РёР№ РјС‹С€Рё/РєР»Р°РІРёР°С‚СѓСЂС‹")
-            self.server_status = 'wait'  # Р’РѕР·РІСЂР°С‰Р°РµРјСЃСЏ РІ СЂРµР¶РёРј РѕР¶РёРґР°РЅРёСЏ
+            print("Нет активных клиентов - останавливаем отправку событий мыши/клавиатуры")
+            self.server_status = 'wait'  # Возвращаемся в режим ожидания
             
         print(f"Client {client_id} fully unregistered")
 
@@ -909,10 +915,10 @@ class ScreenShareServer(QMainWindow):
         return None
 
     def broadcast_roles(self):
-        """РћР±РЅРѕРІР»РµРЅРЅР°СЏ СЂР°СЃСЃС‹Р»РєР° СЂРѕР»РµР№ РґР»СЏ РјРЅРѕР¶РµСЃС‚РІРµРЅРЅС‹С… РєР»РёРµРЅС‚РѕРІ"""
+        """Обновленная рассылка ролей для множественных клиентов"""
         print(f"[DEBUG] broadcast_roles called - controller: {self.controller_id}, clients: {len(self.clients)}")
         
-        # РџСЂРѕРІРµСЂСЏРµРј СЃРѕСЃС‚РѕСЏРЅРёРµ РєРѕРЅС‚СЂРѕР»Р»РµСЂР°
+        # Проверяем состояние контроллера
         if self.controller_id and self.controller_id not in self.clients:
             print(f"[DEBUG] Controller {self.controller_id} not in clients, reassigning")
             self.controller_id = self._next_controller_id()
@@ -924,11 +930,11 @@ class ScreenShareServer(QMainWindow):
         else:
             self.server_status = 'control' if self.controller_id else 'wait'
             
-        # РћР±РЅРѕРІР»СЏРµРј СЃС‚Р°С‚СѓСЃ СЃРµСЂРІРµСЂР°
+        # Обновляем статус сервера
         print(f"[DEBUG] Publishing server status: {self.server_status}")
         self.publish_server_status()
         
-        # РћС‚РїСЂР°РІР»СЏРµРј СЂРѕР»СЊ РєР°Р¶РґРѕРјСѓ РєР»РёРµРЅС‚Сѓ
+        # Отправляем роль каждому клиенту
         print(f"[DEBUG] Sending roles to {len(self.clients)} clients:")
         for client_id, info in self.clients.items():
             role = 'controller' if client_id == self.controller_id else 'viewer'
@@ -944,7 +950,7 @@ class ScreenShareServer(QMainWindow):
                     result = self.client_mqqt.publish(topic, role_message)
                     
                     client_name = info.get('name', client_id)
-                    role_icon = 'рџ‘‘' if role == 'controller' else 'рџ‘Ђ'
+                    role_icon = '👑' if role == 'controller' else '👀'
                     print(f'[DEBUG] {role_icon} ROLE SENT: {client_name} -> {role.upper()} | Topic: {topic} | Message: {role_message} | Result: {result}')
                     
                 except Exception as e:
@@ -956,7 +962,7 @@ class ScreenShareServer(QMainWindow):
             
         controller_name = self.clients.get(self.controller_id, {}).get('name', 'None') if self.controller_id else 'None'
         viewer_count = len(self.clients) - (1 if self.controller_id else 0)
-        print(f'[DEBUG] рџ“Љ BROADCAST COMPLETE: Controller={controller_name}, Viewers={viewer_count}')
+        print(f'[DEBUG] 📊 BROADCAST COMPLETE: Controller={controller_name}, Viewers={viewer_count}')
 
     def publish_server_status(self):
         if not self.client_mqqt:
@@ -975,7 +981,7 @@ class ScreenShareServer(QMainWindow):
             return
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        panel.setMinimumSize(320, 250)  # РЈРІРµР»РёС‡РёР» РІС‹СЃРѕС‚Сѓ РґР»СЏ СЂР°РґРёРѕРєРЅРѕРїРєРё
+        panel.setMinimumSize(320, 250)  # Увеличил высоту для радиокнопки
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
         
@@ -984,7 +990,7 @@ class ScreenShareServer(QMainWindow):
         role_label = QLabel("Role: Viewer")
         status_label = QLabel("Status: Connected")
         
-        # Р Р°РґРёРѕРєРЅРѕРїРєР° РґР»СЏ РІС‹Р±РѕСЂР° РєРѕРЅС‚СЂРѕР»Р»РµСЂР°
+        # Радиокнопка для выбора контроллера
         controller_radio = QRadioButton("Controller")
         controller_radio.setProperty('client_id', client_id)
         self.controller_button_group.addButton(controller_radio)
@@ -1005,7 +1011,7 @@ class ScreenShareServer(QMainWindow):
         layout.addWidget(id_label)
         layout.addWidget(role_label)
         layout.addWidget(status_label)
-        layout.addWidget(controller_radio)  # Р”РѕР±Р°РІР»СЏРµРј СЂР°РґРёРѕРєРЅРѕРїРєСѓ
+        layout.addWidget(controller_radio)  # Добавляем радиокнопку
         
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
@@ -1056,7 +1062,7 @@ class ScreenShareServer(QMainWindow):
         role = info.get('role', 'viewer')
         role_text = 'Controller' if role == 'controller' else 'Viewer'
         
-        # Р”РѕР±Р°РІР»СЏРµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ РєРѕР»РёС‡РµСЃС‚РІР° РєР»РёРµРЅС‚РѕРІ
+        # Добавляем статистику количества клиентов
         total_clients = len(self.clients)
         if role == 'controller':
             role_text += f" (1 of {total_clients})"
@@ -1069,7 +1075,7 @@ class ScreenShareServer(QMainWindow):
         status_text = info.get('status', 'Connected')
         data['status_label'].setText(f"Status: {status_text}")
         
-        # РћР±РЅРѕРІР»СЏРµРј СЂР°РґРёРѕРєРЅРѕРїРєСѓ
+        # Обновляем радиокнопку
         controller_radio = data.get('controller_radio')
         if controller_radio is not None:
             controller_radio.setChecked(role == 'controller')
@@ -1166,6 +1172,14 @@ class ScreenShareServer(QMainWindow):
                 viewer.mqtt_address = entry.get('mqtt_address', '')
                 viewer.mqtt_port = entry.get('mqtt_port', 0)
                 viewer.mqtt_timeout = entry.get('mqtt_timeout', 0)
+                if self.app_manager and hasattr(self.app_manager, 'settings'):
+                    settings = self.app_manager.settings
+                    viewer.mqtt_username = str(settings.value('mqtt_username', '', type=str) or '').strip()
+                    viewer.mqtt_password = str(settings.value('mqtt_password', '', type=str) or '')
+                    viewer.mqtt_transport = str(settings.value('mqtt_transport', 'tcp', type=str) or 'tcp').strip().lower()
+                    viewer.mqtt_use_tls = str(settings.value('mqtt_use_tls', False)).strip().lower() in {'1', 'true', 'yes', 'on'}
+                    viewer.mqtt_tls_insecure = str(settings.value('mqtt_tls_insecure', False)).strip().lower() in {'1', 'true', 'yes', 'on'}
+                    viewer.mqtt_ws_path = str(settings.value('mqtt_ws_path', '/mqtt', type=str) or '/mqtt').strip() or '/mqtt'
                 bind_viewer_window = getattr(viewer, 'set_viewer_window', None)
                 if callable(bind_viewer_window):
                     bind_viewer_window(subwindow)
@@ -1179,7 +1193,7 @@ class ScreenShareServer(QMainWindow):
             except Exception as exc:
                 info['status'] = 'View error'
                 self.update_client_window(client_id)
-                print(f"РћС€РёР±РєР° РїСЂРё РѕС‚РєСЂС‹С‚РёРё РїСЂРѕСЃРјРѕС‚СЂР° {display_name}: {exc}")
+                print(f"Ошибка при открытии просмотра {display_name}: {exc}")
                 subwindow.close()
 
         QTimer.singleShot(0, start_viewer)
@@ -1200,7 +1214,7 @@ class ScreenShareServer(QMainWindow):
             self.update_client_window(client_id)
 
     def remove_client_window(self, client_id):
-        """РџРѕР»РЅРѕРµ СѓРґР°Р»РµРЅРёРµ РѕРєРЅР° РєР»РёРµРЅС‚Р° Рё РѕС‡РёСЃС‚РєР° СЂРµСЃСѓСЂСЃРѕРІ"""
+        """Полное удаление окна клиента и очистка ресурсов"""
         if QtCore.QThread.currentThread() != self.thread():
             self._run_on_ui(lambda cid=client_id: self.remove_client_window(cid))
             return
@@ -1211,7 +1225,7 @@ class ScreenShareServer(QMainWindow):
             
         print(f"Removing window for client {client_id}")
             
-        # РЈРґР°Р»СЏРµРј СЂР°РґРёРѕРєРЅРѕРїРєСѓ РёР· РіСЂСѓРїРїС‹
+        # Удаляем радиокнопку из группы
         controller_radio = data.get('controller_radio')
         if controller_radio is not None:
             try:
@@ -1220,7 +1234,7 @@ class ScreenShareServer(QMainWindow):
             except Exception as e:
                 print(f"Error removing controller radio button: {e}")
             
-        # Р—Р°РєСЂС‹РІР°РµРј РѕРєРЅРѕ РєР»РёРµРЅС‚Р°
+        # Закрываем окно клиента
         window = data.get('window')
         if window is not None:
             try:
@@ -1230,17 +1244,17 @@ class ScreenShareServer(QMainWindow):
             except Exception as e:
                 print(f'Error closing client window {client_id}: {e}')
                 
-        # РћС‡РёС‰Р°РµРј СЃСЃС‹Р»РєРё РЅР° РІСЃРµ РєРѕРјРїРѕРЅРµРЅС‚С‹
+        # Очищаем ссылки на все компоненты
         for key in data:
             data[key] = None
             
         print(f"Client window {client_id} fully removed")
 
-    def BuildPayload(self, next_frame=True):  # РџРµСЂРµРґР°С‡Р° РёР·РѕР±СЂР°Р¶РµРЅРёСЏ СЂР°Р±РѕС‡РµРіРѕ СЃС‚РѕР»Р°
+    def BuildPayload(self, next_frame=True):  # Передача изображения рабочего стола
         with mss.mss() as sct:
             sct_img = sct.grab(sct.monitors[self.monitor])
             image = numpy.array(sct_img)
-            if next_frame:  # Р”Р»СЏ СЃР»РµРґСѓСЋС‰РёС… РёР·РѕР±СЂР°Р¶РµРЅРёР№ С‚РѕР»СЊРєРѕ РёР·РјРµРЅРµРЅРёСЏ
+            if next_frame:  # Для следующих изображений только изменения
                 xor_image = image ^ self.last_image
                 b64img = base64.b64encode(zlib.compress(pickle.dumps(xor_image), 9))
             else:
@@ -1261,7 +1275,7 @@ class ScreenShareServer(QMainWindow):
     #         return b64img
 
     def run(self, server_address='address@mail.com', server_password='', mqtt_address='', mqtt_port=0, mqtt_timeout=0):
-        """РРЎРџР РђР’Р›Р•РќРќР«Р™ РњР•РўРћР” РЎ РџРћР”Р”Р•Р Р–РљРћР™ РџР Р•Р¤РРљРЎРћР’ РўРћРџРРљРћР’"""
+        """ИСПРАВЛЕННЫЙ МЕТОД С ПОДДЕРЖКОЙ ПРЕФИКСОВ ТОПИКОВ"""
         self.server_address = server_address
         self.server_password = server_password
         self.mqtt_address = mqtt_address
@@ -1279,12 +1293,28 @@ class ScreenShareServer(QMainWindow):
             print('MQTT broker address not configured')
             return
             
-        # РЎРћР—Р”РђР•Рњ РџР Р•Р¤РРљРЎ РўРћРџРРљРђ РР— РђР”Р Р•РЎРђ Р РџРђР РћР›РЇ РЎР•Р Р’Р•Р Рђ
+        # СОЗДАЕМ ПРЕФИКС ТОПИКА ИЗ АДРЕСА И ПАРОЛЯ СЕРВЕРА
         self.topic_prefix = f"{address}/{password}"
         print(f"Using topic prefix: {self.topic_prefix}")
+
+        def _to_bool(value):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int):
+                return value != 0
+            return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+        mqtt_username = str(getattr(self, 'mqtt_username', '') or '').strip()
+        mqtt_password = str(getattr(self, 'mqtt_password', '') or '')
+        mqtt_transport = str(getattr(self, 'mqtt_transport', 'tcp') or 'tcp').strip().lower()
+        mqtt_use_tls = _to_bool(getattr(self, 'mqtt_use_tls', False))
+        mqtt_tls_insecure = _to_bool(getattr(self, 'mqtt_tls_insecure', False))
+        mqtt_ws_path = str(getattr(self, 'mqtt_ws_path', '/mqtt') or '/mqtt').strip() or '/mqtt'
+        if mqtt_transport not in {'tcp', 'websockets'}:
+            mqtt_transport = 'tcp'
         
-        # РљР РРўРР§РќРћ: РСЃРїРѕР»СЊР·СѓРµРј clean_session=True РґР»СЏ РїСѓР±Р»РёС‡РЅС‹С… MQTT Р±СЂРѕРєРµСЂРѕРІ
-        client_kwargs = {"client_id": self.my_id, "clean_session": True}
+        # КРИТИЧНО: Используем clean_session=True для публичных MQTT брокеров
+        client_kwargs = {"client_id": self.my_id, "clean_session": True, "transport": mqtt_transport}
         callback_api = getattr(mqtt, "CallbackAPIVersion", None)
         if callback_api is not None:
             version_attr = getattr(callback_api, "VERSION1", None) or getattr(callback_api, "V1", None)
@@ -1296,16 +1326,31 @@ class ScreenShareServer(QMainWindow):
             self.client_mqqt.on_connect = self.on_connect
             self.client_mqqt.on_disconnect = self.on_disconnect
             self.client_mqqt.on_message = self.on_message
+            if mqtt_username:
+                self.client_mqqt.username_pw_set(mqtt_username, mqtt_password or None)
+            if mqtt_transport == 'websockets':
+                self.client_mqqt.ws_set_options(path=mqtt_ws_path)
+            if mqtt_use_tls:
+                self.client_mqqt.tls_set()
+                self.client_mqqt.tls_insecure_set(mqtt_tls_insecure)
             
-            # РЈР»СѓС‡С€РµРЅРЅР°СЏ РѕР±СЂР°Р±РѕС‚РєР° РїР°СЂР°РјРµС‚СЂРѕРІ РїРѕРґРєР»СЋС‡РµРЅРёСЏ
-            mqtt_port = int(self.mqtt_port) if self.mqtt_port and str(self.mqtt_port).strip() else 1883
+            # Улучшенная обработка параметров подключения
+            default_port = 1883
+            if mqtt_use_tls:
+                default_port = 443 if mqtt_transport == 'websockets' else 8883
+            elif mqtt_transport == 'websockets':
+                default_port = 8080
+            mqtt_port = int(self.mqtt_port) if self.mqtt_port and str(self.mqtt_port).strip() else default_port
             mqtt_timeout = int(self.mqtt_timeout) if self.mqtt_timeout and str(self.mqtt_timeout).strip() else 60
             
-            print(f'Connecting to MQTT broker: {self.mqtt_address}:{mqtt_port}')
+            print(
+                f'Connecting to MQTT broker: {self.mqtt_address}:{mqtt_port} '
+                f'(transport={mqtt_transport}, tls={mqtt_use_tls})'
+            )
             self.client_mqqt.connect(self.mqtt_address, mqtt_port, mqtt_timeout)
             self.client_mqqt.loop_start()
             
-            # РўРћРџРРљР РЎ РџР Р•Р¤РРљРЎРђРњР Р”Р›РЇ РР—РћР›РЇР¦РР РЎР•Р Р’Р•Р РћР’
+            # ТОПИКИ С ПРЕФИКСАМИ ДЛЯ ИЗОЛЯЦИИ СЕРВЕРОВ
             topics = [
                 'server/status',
                 'server/quit',
@@ -1324,7 +1369,7 @@ class ScreenShareServer(QMainWindow):
                 'server/mouse/move',
                 'server/mouse/drag_end'
             ]
-            print(f"\n=== SERVER SUBSCRIPTIONS РЎ РџР Р•Р¤РРљРЎРђРњР ===")
+            print(f"\n=== SERVER SUBSCRIPTIONS С ПРЕФИКСАМИ ===")
             print(f"Topic prefix: '{self.topic_prefix}'")
             for topic in topics:
                 full_topic = self.build_topic(topic)
@@ -1334,7 +1379,7 @@ class ScreenShareServer(QMainWindow):
                 
             self.server_status = 'wait'
             self.publish_server_status()
-            self.timer.start(1000)  # РћР РР“РРќРђР›Р¬РќР«Р™ РўРђР™РњР•Р  1000РјСЃ
+            self.timer.start(1000)  # ОРИГИНАЛЬНЫЙ ТАЙМЕР 1000мс
             self.connect_mqtt = True
             print(f'Server started successfully with prefix: {self.topic_prefix}')
             
@@ -1343,19 +1388,19 @@ class ScreenShareServer(QMainWindow):
             print(f'Could not connect to the MQTT server: {e}')
 
     def has_active_clients(self):
-        """РџСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ Р°РєС‚РёРІРЅС‹С… РїРѕРґРєР»СЋС‡РµРЅРЅС‹С… РєР»РёРµРЅС‚РѕРІ"""
+        """Проверяем наличие активных подключенных клиентов"""
         active_count = sum(1 for info in self.clients.values() 
                           if info.get('status') == 'Connected')
         return active_count > 0
         
     def has_viewer_clients(self):
-        """РџСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ viewer-РєР»РёРµРЅС‚РѕРІ"""
+        """Проверяем наличие viewer-клиентов"""
         viewer_count = sum(1 for info in self.clients.values() 
                           if info.get('status') == 'Connected' and info.get('role') == 'viewer')
         return viewer_count > 0
         
     def get_client_stats(self):
-        """РџРѕР»СѓС‡Р°РµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ РєР»РёРµРЅС‚РѕРІ"""
+        """Получаем статистику клиентов"""
         total = len(self.clients)
         active = sum(1 for info in self.clients.values() if info.get('status') == 'Connected')
         controller_name = self.clients.get(self.controller_id, {}).get('name', 'None') if self.controller_id else 'None'
@@ -1369,7 +1414,7 @@ class ScreenShareServer(QMainWindow):
         }
         
     def send_mouse_position_update(self):
-        """РћС‚РїСЂР°РІР»СЏРµРј РїРѕР·РёС†РёСЋ РјС‹С€Рё С‚РѕР»СЊРєРѕ РµСЃР»Рё РµСЃС‚СЊ Р°РєС‚РёРІРЅС‹Рµ РєР»РёРµРЅС‚С‹"""
+        """Отправляем позицию мыши только если есть активные клиенты"""
         if not self.client_mqqt or not self.has_active_clients():
             return
             
@@ -1393,9 +1438,9 @@ class ScreenShareServer(QMainWindow):
             self.reset_session_state()
             return
             
-        # РљР РРўРР§Р•РЎРљР Р’РђР–РќРћ: РџСЂРѕРІРµСЂСЏРµРј РЅР°Р»РёС‡РёРµ Р°РєС‚РёРІРЅС‹С… РєР»РёРµРЅС‚РѕРІ
+        # КРИТИЧЕСКИ ВАЖНО: Проверяем наличие активных клиентов
         if not self.has_active_clients():
-            # Р•СЃР»Рё РЅРµС‚ Р°РєС‚РёРІРЅС‹С… РєР»РёРµРЅС‚РѕРІ, РЅРµ РѕС‚РїСЂР°РІР»СЏРµРј СЃРѕР±С‹С‚РёСЏ РјС‹С€Рё/РєР»Р°РІРёР°С‚СѓСЂС‹
+            # Если нет активных клиентов, не отправляем события мыши/клавиатуры
             return
             
         # Only publish status occasionally, not every frame
@@ -1405,12 +1450,10 @@ class ScreenShareServer(QMainWindow):
         if self._status_counter % 30 == 0:  # Every 30 frames (~4.5 seconds at 150ms)
             self.publish_server_status()
             
-            # Р›РѕРіРёСЂСѓРµРј СЃС‚Р°С‚РёСЃС‚РёРєСѓ РєР»РёРµРЅС‚РѕРІ РєР°Р¶РґС‹Рµ 30 С„СЂРµР№РјРѕРІ
+            # Логируем статистику клиентов каждые 30 фреймов
             stats = self.get_client_stats()
             if stats['active'] > 0:
-                print(f"рџ“Љ STATS: Active={stats['active']}, Controller={stats['controller']}, Viewers={stats['viewers']}")
+                print(f"📊 STATS: Active={stats['active']}, Controller={stats['controller']}, Viewers={stats['viewers']}")
             
-        # РћРўРџР РђР’Р›РЇР•Рњ РџРћР—РР¦РР® РњР«РЁР РўРћР›Р¬РљРћ Р•РЎР›Р Р•РЎРўР¬ РђРљРўРР’РќР«Р• РљР›РР•РќРўР«
+        # ОТПРАВЛЯЕМ ПОЗИЦИЮ МЫШИ ТОЛЬКО ЕСЛИ ЕСТЬ АКТИВНЫЕ КЛИЕНТЫ
         self.send_mouse_position_update()
-
-

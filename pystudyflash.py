@@ -1,12 +1,16 @@
 import os
 import pickle
 import sys
+import threading
+import uuid
 
 from PyQt6.QtCore import Qt, QSettings, QEvent, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QCursor
 from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QPushButton, QWidget, QToolButton, QMenu, QToolBar, \
     QMdiArea, QMdiSubWindow, QDialog, QTableWidget, QTableWidgetItem, QFormLayout, \
-    QLineEdit, QHeaderView, QDialogButtonBox, QAbstractItemView, QCheckBox, QLabel, QTabWidget, QDockWidget, QHBoxLayout, QFrame
+    QLineEdit, QHeaderView, QDialogButtonBox, QAbstractItemView, QCheckBox, QLabel, QTabWidget, QDockWidget, QHBoxLayout, QFrame, \
+    QComboBox, QMessageBox
+import paho.mqtt.client as mqtt
 
 from app_paths import address_book_file_path, settings_file_path
 
@@ -61,6 +65,22 @@ class SettingsDialog(QDialog):
         self.mqtt_address_input = QLineEdit()
         self.mqtt_port_input = QLineEdit()
         self.mqtt_timeout_input = QLineEdit()
+        self.mqtt_username_input = QLineEdit()
+        self.mqtt_password_input = QLineEdit()
+        self.mqtt_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.show_mqtt_password_check = QCheckBox('Показать MQTT пароль')
+        self.show_mqtt_password_check.toggled.connect(self.toggle_mqtt_password_visibility)
+        self.mqtt_transport_input = QComboBox()
+        self.mqtt_transport_input.addItem('TCP', 'tcp')
+        self.mqtt_transport_input.addItem('WebSockets', 'websockets')
+        self.mqtt_transport_input.currentIndexChanged.connect(self._update_mqtt_controls)
+        self.mqtt_tls_check = QCheckBox('Использовать TLS')
+        self.mqtt_tls_check.toggled.connect(self._update_mqtt_controls)
+        self.mqtt_tls_insecure_check = QCheckBox('Разрешить недоверенный сертификат (только тест)')
+        self.mqtt_ws_path_input = QLineEdit('/mqtt')
+        self.mqtt_ws_path_input.setPlaceholderText('/mqtt')
+        self.test_mqtt_button = QPushButton('Проверить MQTT подключение')
+        self.test_mqtt_button.clicked.connect(self.test_mqtt_connection)
         self.save_mqtt_button = QPushButton('Сохранить')
         self.save_mqtt_button.clicked.connect(self.save_settings)
 
@@ -72,6 +92,18 @@ class SettingsDialog(QDialog):
         mqtt_layout.addWidget(self.mqtt_port_input)
         mqtt_layout.addWidget(QLabel('Таймаут'))
         mqtt_layout.addWidget(self.mqtt_timeout_input)
+        mqtt_layout.addWidget(QLabel('Транспорт'))
+        mqtt_layout.addWidget(self.mqtt_transport_input)
+        mqtt_layout.addWidget(QLabel('Пользователь'))
+        mqtt_layout.addWidget(self.mqtt_username_input)
+        mqtt_layout.addWidget(QLabel('Пароль'))
+        mqtt_layout.addWidget(self.mqtt_password_input)
+        mqtt_layout.addWidget(self.show_mqtt_password_check)
+        mqtt_layout.addWidget(self.mqtt_tls_check)
+        mqtt_layout.addWidget(self.mqtt_tls_insecure_check)
+        mqtt_layout.addWidget(QLabel('WebSocket path'))
+        mqtt_layout.addWidget(self.mqtt_ws_path_input)
+        mqtt_layout.addWidget(self.test_mqtt_button)
         mqtt_layout.addWidget(self.save_mqtt_button)
 
         self.mqtt_tab.setLayout(mqtt_layout)
@@ -86,18 +118,155 @@ class SettingsDialog(QDialog):
     def toggle_password_visibility(self, checked):
         self.server_password_input.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
 
+    def toggle_mqtt_password_visibility(self, checked):
+        self.mqtt_password_input.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
+
+    @staticmethod
+    def _to_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value != 0
+        text = str(value or '').strip().lower()
+        return text in {'1', 'true', 'yes', 'on'}
+
+    def _update_mqtt_controls(self):
+        transport = self.mqtt_transport_input.currentData()
+        use_ws = transport == 'websockets'
+        use_tls = self.mqtt_tls_check.isChecked()
+        self.mqtt_ws_path_input.setEnabled(use_ws)
+        self.mqtt_tls_insecure_check.setEnabled(use_tls)
+
     def load_settings(self):
         server_address = self.settings.value('server_address', '')
         server_password = self.settings.value('server_password', '')
         mqtt_address = self.settings.value('mqtt_address', '')
         mqtt_port = self.settings.value('mqtt_port', '')
         mqtt_timeout = self.settings.value('mqtt_timeout', '')
+        mqtt_username = self.settings.value('mqtt_username', '')
+        mqtt_password = self.settings.value('mqtt_password', '')
+        mqtt_transport = str(self.settings.value('mqtt_transport', 'tcp') or 'tcp').strip().lower()
+        mqtt_use_tls = self._to_bool(self.settings.value('mqtt_use_tls', False))
+        mqtt_tls_insecure = self._to_bool(self.settings.value('mqtt_tls_insecure', False))
+        mqtt_ws_path = self.settings.value('mqtt_ws_path', '/mqtt')
 
-        self.server_address_input.setText(server_address)
-        self.server_password_input.setText(server_password)
-        self.mqtt_address_input.setText(mqtt_address)
-        self.mqtt_port_input.setText(mqtt_port)
-        self.mqtt_timeout_input.setText(mqtt_timeout)
+        self.server_address_input.setText(str(server_address or ''))
+        self.server_password_input.setText(str(server_password or ''))
+        self.mqtt_address_input.setText(str(mqtt_address or ''))
+        self.mqtt_port_input.setText(str(mqtt_port or ''))
+        self.mqtt_timeout_input.setText(str(mqtt_timeout or ''))
+        self.mqtt_username_input.setText(str(mqtt_username or ''))
+        self.mqtt_password_input.setText(str(mqtt_password or ''))
+        self.mqtt_tls_check.setChecked(bool(mqtt_use_tls))
+        self.mqtt_tls_insecure_check.setChecked(bool(mqtt_tls_insecure))
+        self.mqtt_ws_path_input.setText(str(mqtt_ws_path or '/mqtt'))
+        index = self.mqtt_transport_input.findData(mqtt_transport)
+        if index < 0:
+            index = self.mqtt_transport_input.findData('tcp')
+        if index >= 0:
+            self.mqtt_transport_input.setCurrentIndex(index)
+        self._update_mqtt_controls()
+
+    def test_mqtt_connection(self):
+        host = self.mqtt_address_input.text().strip()
+        if not host:
+            QMessageBox.warning(self, 'MQTT', 'Укажите адрес MQTT брокера.')
+            return
+
+        transport = str(self.mqtt_transport_input.currentData() or 'tcp').strip().lower()
+        if transport not in {'tcp', 'websockets'}:
+            transport = 'tcp'
+
+        use_tls = self.mqtt_tls_check.isChecked()
+        tls_insecure = self.mqtt_tls_insecure_check.isChecked()
+        ws_path = self.mqtt_ws_path_input.text().strip() or '/mqtt'
+
+        try:
+            timeout = int(self.mqtt_timeout_input.text().strip() or 60)
+        except ValueError:
+            timeout = 60
+
+        default_port = 1883
+        if use_tls:
+            default_port = 443 if transport == 'websockets' else 8883
+        elif transport == 'websockets':
+            default_port = 8080
+
+        try:
+            port = int(self.mqtt_port_input.text().strip() or default_port)
+        except ValueError:
+            port = default_port
+
+        username = self.mqtt_username_input.text().strip()
+        password = self.mqtt_password_input.text()
+        result = {'rc': None, 'error': None}
+        wait_event = threading.Event()
+        test_client = None
+
+        try:
+            client_kwargs = {
+                'client_id': f"pyStudyFlash-test-{uuid.uuid4().hex[:8]}",
+                'clean_session': True,
+                'transport': transport,
+            }
+            callback_api = getattr(mqtt, "CallbackAPIVersion", None)
+            if callback_api is not None:
+                version_attr = getattr(callback_api, "VERSION1", None) or getattr(callback_api, "V1", None)
+                if version_attr is not None:
+                    client_kwargs["callback_api_version"] = version_attr
+            test_client = mqtt.Client(**client_kwargs)
+
+            def _on_connect(_client, _userdata, _flags, rc, properties=None):
+                result['rc'] = rc
+                wait_event.set()
+
+            def _on_disconnect(_client, _userdata, _rc, properties=None):
+                wait_event.set()
+
+            test_client.on_connect = _on_connect
+            test_client.on_disconnect = _on_disconnect
+
+            if username:
+                test_client.username_pw_set(username, password or None)
+            if transport == 'websockets':
+                test_client.ws_set_options(path=ws_path)
+            if use_tls:
+                test_client.tls_set()
+                test_client.tls_insecure_set(bool(tls_insecure))
+
+            test_client.connect(host, port, timeout)
+            test_client.loop_start()
+            wait_event.wait(timeout=min(max(timeout, 3), 10))
+        except Exception as exc:
+            result['error'] = str(exc)
+        finally:
+            if test_client is not None:
+                try:
+                    test_client.loop_stop()
+                except Exception:
+                    pass
+                try:
+                    test_client.disconnect()
+                except Exception:
+                    pass
+
+        if result['error']:
+            QMessageBox.critical(self, 'MQTT', f'Ошибка подключения:\n{result["error"]}')
+            return
+
+        if result['rc'] == 0:
+            QMessageBox.information(self, 'MQTT', f'Подключение успешно: {host}:{port}')
+            return
+
+        rc = result['rc']
+        error_text = {
+            1: 'Неверная версия протокола',
+            2: 'Некорректный client id',
+            3: 'Сервер недоступен',
+            4: 'Неверный логин/пароль',
+            5: 'Доступ запрещен',
+        }.get(rc, f'Код ответа: {rc}')
+        QMessageBox.warning(self, 'MQTT', f'Подключение не установлено.\n{error_text}')
 
     def save_settings(self):
         server_address = self.server_address_input.text()
@@ -105,41 +274,68 @@ class SettingsDialog(QDialog):
         mqtt_address = self.mqtt_address_input.text()
         mqtt_port = self.mqtt_port_input.text()
         mqtt_timeout = self.mqtt_timeout_input.text()
+        mqtt_username = self.mqtt_username_input.text()
+        mqtt_password = self.mqtt_password_input.text()
+        mqtt_transport = str(self.mqtt_transport_input.currentData() or 'tcp').strip().lower()
+        mqtt_use_tls = self.mqtt_tls_check.isChecked()
+        mqtt_tls_insecure = self.mqtt_tls_insecure_check.isChecked()
+        mqtt_ws_path = self.mqtt_ws_path_input.text().strip() or '/mqtt'
 
         self.settings.setValue('server_address', server_address)
         self.settings.setValue('server_password', server_password)
         self.settings.setValue('mqtt_address', mqtt_address)
         self.settings.setValue('mqtt_port', mqtt_port)
         self.settings.setValue('mqtt_timeout', mqtt_timeout)
+        self.settings.setValue('mqtt_username', mqtt_username)
+        self.settings.setValue('mqtt_password', mqtt_password)
+        self.settings.setValue('mqtt_transport', mqtt_transport)
+        self.settings.setValue('mqtt_use_tls', mqtt_use_tls)
+        self.settings.setValue('mqtt_tls_insecure', mqtt_tls_insecure)
+        self.settings.setValue('mqtt_ws_path', mqtt_ws_path)
 
         self.close()
 
 
 class AddressBookDialog(QDialog):
+    COLUMN_HEADERS = [
+        'Адрес сервера',
+        'Пользователь',
+        'Пароль',
+        'Группа',
+        'MQTT сервер',
+        'MQTT порт',
+        'MQTT таймаут',
+        'MQTT пользователь',
+        'MQTT пароль',
+        'MQTT транспорт',
+        'MQTT TLS',
+        'MQTT TLS insecure',
+        'MQTT WS path',
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self.table = QTableWidget(self)
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(
-            ['Адрес сервера', 'Пользователь', 'Пароль', 'Группа', 'MQTT сервер', 'MQTT порт', 'MQTT таймаут'])
-        
-        # Fix: Ensure horizontalHeader is not None before calling setSectionResizeMode
+        self.table.setColumnCount(len(self.COLUMN_HEADERS))
+        self.table.setHorizontalHeaderLabels(self.COLUMN_HEADERS)
+
         header = self.table.horizontalHeader()
         if header is not None:
             header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-            
+
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)  # запретить редактирование
         self.table.hideColumn(2)  # скрыть колонку пароля
+        self.table.hideColumn(8)  # скрыть MQTT пароль
 
         self.add_button = QPushButton('Добавить', self)
-        self.add_button.clicked.connect(self.add_entry)
+        self.add_button.clicked.connect(lambda _checked=False: self.add_entry())
 
         self.edit_button = QPushButton('Редактировать', self)
-        self.edit_button.clicked.connect(self.edit_entry)
+        self.edit_button.clicked.connect(lambda _checked=False: self.edit_entry())
 
         self.delete_button = QPushButton('Удалить', self)
-        self.delete_button.clicked.connect(self.delete_entry)
+        self.delete_button.clicked.connect(lambda _checked=False: self.delete_entry())
         self.view_button = QPushButton('Просмотр', self)
         self.view_button.clicked.connect(lambda: self.view_entry(self.table.currentRow()))
 
@@ -165,29 +361,82 @@ class AddressBookDialog(QDialog):
 
         self.load_data()
 
+    @staticmethod
+    def _parse_int(value, default=0):
+        try:
+            return int(str(value).strip() or default)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _parse_bool(value):
+        text = str(value or '').strip().lower()
+        if text == '':
+            return None
+        if text in {'1', 'true', 'yes', 'on'}:
+            return True
+        if text in {'0', 'false', 'no', 'off'}:
+            return False
+        return None
+
+    def _row_text(self, row, column):
+        item = self.table.item(row, column)
+        return item.text().strip() if item else ''
+
+    def _normalize_row_data(self, row_data):
+        normalized = [''] * self.table.columnCount()
+        if isinstance(row_data, (list, tuple)):
+            for idx, value in enumerate(row_data[:len(normalized)]):
+                normalized[idx] = '' if value is None else str(value)
+        return normalized
+
     def view_entry(self, current_row=None):
-        current_row = self.table.currentRow()
-        if current_row is not None and current_row != -1:
-            server_address_item = self.table.item(current_row, 0)
-            server_password_item = self.table.item(current_row, 2)
-            mqtt_address_item = self.table.item(current_row, 4)
-            mqtt_port_item = self.table.item(current_row, 5)
-            mqtt_timeout_item = self.table.item(current_row, 6)
+        if current_row is None:
+            current_row = self.table.currentRow()
+        if current_row is None or current_row < 0:
+            return
 
-            server_address = server_address_item.text() if server_address_item else ''
-            server_password = server_password_item.text() if server_password_item else ''
-            mqtt_address = mqtt_address_item.text() if mqtt_address_item else ''
-            mqtt_port = int(mqtt_port_item.text()) if mqtt_port_item else 0
-            mqtt_timeout = int(mqtt_timeout_item.text()) if mqtt_timeout_item else 0
+        server_address = self._row_text(current_row, 0)
+        server_password = self._row_text(current_row, 2)
 
-            # Fix: Properly access the connect_to_server method from the parent ScreenShareApp
-            # Using getattr to avoid linter issues with dynamic attribute access
-            parent_app = self.parent()
-            connect_method = getattr(parent_app, 'connect_to_server', None)
-            if connect_method and callable(connect_method):
-                connect_method(server_address, server_password, mqtt_address, mqtt_port, mqtt_timeout)
-            else:
-                print(f"Error: Could not access connect_to_server method. Parent type: {type(parent_app)}")
+        mqtt_address_text = self._row_text(current_row, 4)
+        mqtt_port_text = self._row_text(current_row, 5)
+        mqtt_timeout_text = self._row_text(current_row, 6)
+        mqtt_username_text = self._row_text(current_row, 7)
+        mqtt_password_text = self._row_text(current_row, 8)
+        mqtt_transport_text = self._row_text(current_row, 9).lower()
+        mqtt_use_tls_text = self._row_text(current_row, 10)
+        mqtt_tls_insecure_text = self._row_text(current_row, 11)
+        mqtt_ws_path_text = self._row_text(current_row, 12)
+
+        mqtt_address = mqtt_address_text or None
+        mqtt_port = self._parse_int(mqtt_port_text, default=0) if mqtt_port_text else None
+        mqtt_timeout = self._parse_int(mqtt_timeout_text, default=0) if mqtt_timeout_text else None
+        mqtt_username = mqtt_username_text or None
+        mqtt_password = mqtt_password_text if (mqtt_username_text or mqtt_password_text) else None
+        mqtt_transport = mqtt_transport_text if mqtt_transport_text in {'tcp', 'websockets'} else None
+        mqtt_use_tls = self._parse_bool(mqtt_use_tls_text)
+        mqtt_tls_insecure = self._parse_bool(mqtt_tls_insecure_text)
+        mqtt_ws_path = mqtt_ws_path_text or None
+
+        parent_app = self.parent()
+        connect_method = getattr(parent_app, 'connect_to_server', None)
+        if connect_method and callable(connect_method):
+            connect_method(
+                server_address=server_address,
+                server_password=server_password,
+                mqtt_address=mqtt_address,
+                mqtt_port=mqtt_port,
+                mqtt_timeout=mqtt_timeout,
+                mqtt_username=mqtt_username,
+                mqtt_password=mqtt_password,
+                mqtt_transport=mqtt_transport,
+                mqtt_use_tls=mqtt_use_tls,
+                mqtt_tls_insecure=mqtt_tls_insecure,
+                mqtt_ws_path=mqtt_ws_path,
+            )
+        else:
+            print(f"Error: Could not access connect_to_server method. Parent type: {type(parent_app)}")
 
     def view_group_entry(self):
         current_row = self.table.currentRow()
@@ -206,15 +455,15 @@ class AddressBookDialog(QDialog):
         address_book_path = address_book_file_path()
         if os.path.exists(address_book_path):
             with open(address_book_path, 'rb') as f:
-                data = pickle.load(f)
+                raw_data = pickle.load(f)
 
-            for row_data in data:
+            for row_data in raw_data:
+                normalized_row = self._normalize_row_data(row_data)
                 row = self.table.rowCount()
                 self.table.insertRow(row)
 
-                for column, data in enumerate(row_data):
-                    item = QTableWidgetItem(data)
-                    self.table.setItem(row, column, item)
+                for column, value in enumerate(normalized_row):
+                    self.table.setItem(row, column, QTableWidgetItem(value))
 
     def save_data(self):
         data = []
@@ -232,10 +481,17 @@ class AddressBookDialog(QDialog):
     def add_entry(self):
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.edit_entry(row)
+        for column in range(self.table.columnCount()):
+            self.table.setItem(row, column, QTableWidgetItem(''))
+        if not self.edit_entry(row):
+            self.table.removeRow(row)
 
     def edit_entry(self, current_row=None):
-        current_row = self.table.currentRow()
+        # QPushButton.clicked sends bool; treat it as "no explicit row".
+        if isinstance(current_row, bool):
+            current_row = None
+        if current_row is None:
+            current_row = self.table.currentRow()
 
         if current_row > -1:
             email_item = self.table.item(current_row, 0)
@@ -245,9 +501,16 @@ class AddressBookDialog(QDialog):
             mqtt_server_item = self.table.item(current_row, 4)
             mqtt_port_item = self.table.item(current_row, 5)
             mqtt_timeout_item = self.table.item(current_row, 6)
+            mqtt_username_item = self.table.item(current_row, 7)
+            mqtt_password_item = self.table.item(current_row, 8)
+            mqtt_transport_item = self.table.item(current_row, 9)
+            mqtt_tls_item = self.table.item(current_row, 10)
+            mqtt_tls_insecure_item = self.table.item(current_row, 11)
+            mqtt_ws_path_item = self.table.item(current_row, 12)
 
             dialog = QDialog()
             layout = QFormLayout(dialog)
+            dialog.setWindowTitle('Редактирование записи')
 
             email_edit = QLineEdit(email_item.text() if email_item else '')
             email_edit.setFixedWidth(50 * email_edit.fontMetrics().averageCharWidth())
@@ -276,12 +539,76 @@ class AddressBookDialog(QDialog):
             layout.addRow('MQTT сервер:', mqtt_server_edit)
 
             mqtt_port_edit = QLineEdit(mqtt_port_item.text() if mqtt_port_item else '')
-            mqtt_server_edit.setFixedWidth(50 * mqtt_port_edit.fontMetrics().averageCharWidth())
+            mqtt_port_edit.setFixedWidth(50 * mqtt_port_edit.fontMetrics().averageCharWidth())
             layout.addRow('MQTT порт:', mqtt_port_edit)
 
             mqtt_timeout_edit = QLineEdit(mqtt_timeout_item.text() if mqtt_timeout_item else '')
             mqtt_timeout_edit.setFixedWidth(50 * mqtt_timeout_edit.fontMetrics().averageCharWidth())
             layout.addRow('MQTT таймаут:', mqtt_timeout_edit)
+
+            mqtt_username_edit = QLineEdit(mqtt_username_item.text() if mqtt_username_item else '')
+            mqtt_username_edit.setFixedWidth(50 * mqtt_username_edit.fontMetrics().averageCharWidth())
+            layout.addRow('MQTT пользователь:', mqtt_username_edit)
+
+            mqtt_password_edit = QLineEdit(mqtt_password_item.text() if mqtt_password_item else '')
+            mqtt_password_edit.setFixedWidth(50 * mqtt_password_edit.fontMetrics().averageCharWidth())
+            mqtt_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            layout.addRow('MQTT пароль:', mqtt_password_edit)
+
+            show_mqtt_password_check = QCheckBox('Показать MQTT пароль')
+            show_mqtt_password_check.stateChanged.connect(
+                lambda: mqtt_password_edit.setEchoMode(
+                    QLineEdit.EchoMode.Normal if show_mqtt_password_check.isChecked() else QLineEdit.EchoMode.Password
+                )
+            )
+            layout.addRow(show_mqtt_password_check)
+
+            mqtt_transport_edit = QComboBox()
+            mqtt_transport_edit.addItem('Из настроек', '')
+            mqtt_transport_edit.addItem('TCP', 'tcp')
+            mqtt_transport_edit.addItem('WebSockets', 'websockets')
+            transport_value = (mqtt_transport_item.text() if mqtt_transport_item else '').strip().lower()
+            transport_index = mqtt_transport_edit.findData(transport_value if transport_value in {'tcp', 'websockets'} else '')
+            if transport_index >= 0:
+                mqtt_transport_edit.setCurrentIndex(transport_index)
+            layout.addRow('MQTT транспорт:', mqtt_transport_edit)
+
+            mqtt_tls_edit = QComboBox()
+            mqtt_tls_edit.addItem('Из настроек', '')
+            mqtt_tls_edit.addItem('Включено', 'true')
+            mqtt_tls_edit.addItem('Выключено', 'false')
+            tls_value = (mqtt_tls_item.text() if mqtt_tls_item else '').strip().lower()
+            if tls_value in {'1', 'true', 'yes', 'on'}:
+                tls_value = 'true'
+            elif tls_value in {'0', 'false', 'no', 'off'}:
+                tls_value = 'false'
+            else:
+                tls_value = ''
+            tls_index = mqtt_tls_edit.findData(tls_value)
+            if tls_index >= 0:
+                mqtt_tls_edit.setCurrentIndex(tls_index)
+            layout.addRow('MQTT TLS:', mqtt_tls_edit)
+
+            mqtt_tls_insecure_edit = QComboBox()
+            mqtt_tls_insecure_edit.addItem('Из настроек', '')
+            mqtt_tls_insecure_edit.addItem('Включено', 'true')
+            mqtt_tls_insecure_edit.addItem('Выключено', 'false')
+            tls_insecure_value = (mqtt_tls_insecure_item.text() if mqtt_tls_insecure_item else '').strip().lower()
+            if tls_insecure_value in {'1', 'true', 'yes', 'on'}:
+                tls_insecure_value = 'true'
+            elif tls_insecure_value in {'0', 'false', 'no', 'off'}:
+                tls_insecure_value = 'false'
+            else:
+                tls_insecure_value = ''
+            tls_insecure_index = mqtt_tls_insecure_edit.findData(tls_insecure_value)
+            if tls_insecure_index >= 0:
+                mqtt_tls_insecure_edit.setCurrentIndex(tls_insecure_index)
+            layout.addRow('MQTT TLS insecure:', mqtt_tls_insecure_edit)
+
+            mqtt_ws_path_edit = QLineEdit(mqtt_ws_path_item.text() if mqtt_ws_path_item else '')
+            mqtt_ws_path_edit.setPlaceholderText('/mqtt (пусто = из настроек)')
+            mqtt_ws_path_edit.setFixedWidth(50 * mqtt_ws_path_edit.fontMetrics().averageCharWidth())
+            layout.addRow('MQTT WS path:', mqtt_ws_path_edit)
 
             button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
                                           Qt.Orientation.Horizontal, dialog)
@@ -298,11 +625,21 @@ class AddressBookDialog(QDialog):
                 self.table.setItem(current_row, 4, QTableWidgetItem(mqtt_server_edit.text()))
                 self.table.setItem(current_row, 5, QTableWidgetItem(mqtt_port_edit.text()))
                 self.table.setItem(current_row, 6, QTableWidgetItem(mqtt_timeout_edit.text()))
+                self.table.setItem(current_row, 7, QTableWidgetItem(mqtt_username_edit.text()))
+                self.table.setItem(current_row, 8, QTableWidgetItem(mqtt_password_edit.text()))
+                self.table.setItem(current_row, 9, QTableWidgetItem(str(mqtt_transport_edit.currentData() or '')))
+                self.table.setItem(current_row, 10, QTableWidgetItem(str(mqtt_tls_edit.currentData() or '')))
+                self.table.setItem(current_row, 11, QTableWidgetItem(str(mqtt_tls_insecure_edit.currentData() or '')))
+                self.table.setItem(current_row, 12, QTableWidgetItem(mqtt_ws_path_edit.text()))
 
                 self.save_data()
+                self.table.resizeColumnsToContents()
+                self.table.resizeRowsToContents()
+                return True
 
         self.table.resizeColumnsToContents()
         self.table.resizeRowsToContents()
+        return False
 
     def delete_entry(self):
         current_row = self.table.currentRow()
@@ -320,6 +657,7 @@ class ViewerHostWindow(QMainWindow):
         self._normal_geometry = None
         self._normal_window_state = Qt.WindowState.WindowNoState
         self._normal_window_flags = self.windowFlags()
+        self._was_maximized_before_fullscreen = False
 
         self._overlay = QFrame(self)
         self._overlay.setFrameShape(QFrame.Shape.StyledPanel)
@@ -394,7 +732,8 @@ class ViewerHostWindow(QMainWindow):
         if self._fullscreen_mode:
             return
         self._fullscreen_mode = True
-        self._normal_geometry = self.geometry()
+        self._was_maximized_before_fullscreen = self.isMaximized()
+        self._normal_geometry = self.normalGeometry() if self._was_maximized_before_fullscreen else self.geometry()
         self._normal_window_state = self.windowState()
         self._normal_window_flags = self.windowFlags()
         fullscreen_flags = (
@@ -425,7 +764,7 @@ class ViewerHostWindow(QMainWindow):
         self._overlay.hide()
         self.setWindowFlags(self._normal_window_flags)
         self.showNormal()
-        if self._normal_window_state == Qt.WindowState.WindowMaximized:
+        if self._was_maximized_before_fullscreen:
             self.showMaximized()
         elif self._normal_geometry is not None:
             self.setGeometry(self._normal_geometry)
@@ -500,6 +839,14 @@ class ViewerHostWindow(QMainWindow):
 
 
 class ScreenShareApp(QMainWindow):
+    @staticmethod
+    def _setting_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value != 0
+        return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
     def __init__(self):
         super().__init__()
 
@@ -520,6 +867,12 @@ class ScreenShareApp(QMainWindow):
         self.pub_mqtt_address = str(self.settings.value('mqtt_address', '', type=str) or '')
         self.pub_mqtt_port = self.settings.value('mqtt_port', 0, type=int)
         self.pub_mqtt_timeout = self.settings.value('mqtt_timeout', 0, type=int)
+        self.pub_mqtt_username = str(self.settings.value('mqtt_username', '', type=str) or '')
+        self.pub_mqtt_password = str(self.settings.value('mqtt_password', '', type=str) or '')
+        self.pub_mqtt_transport = str(self.settings.value('mqtt_transport', 'tcp', type=str) or 'tcp').strip().lower()
+        self.pub_mqtt_use_tls = self._setting_bool(self.settings.value('mqtt_use_tls', False))
+        self.pub_mqtt_tls_insecure = self._setting_bool(self.settings.value('mqtt_tls_insecure', False))
+        self.pub_mqtt_ws_path = str(self.settings.value('mqtt_ws_path', '/mqtt', type=str) or '/mqtt')
 
         self.dialog = AddressBookDialog(self)  # Создать объект адресной книги
         self.server = None
@@ -542,6 +895,9 @@ class ScreenShareApp(QMainWindow):
         self.menu_action_help = QAction('Помощь', self)
         self.menu_action_about = QAction('Об pyStudyFlash', self)
         self.menu_action_exit = QAction('Выход', self)
+        self.menu_action_help.triggered.connect(self.show_help)
+        self.menu_action_about.triggered.connect(self.show_about)
+        self.menu_action_exit.triggered.connect(self.close)
 
         self.menu.addAction(self.menu_action_settings)
         self.menu.addAction(self.menu_action_address_book)
@@ -587,7 +943,37 @@ class ScreenShareApp(QMainWindow):
         self.setCentralWidget(main_widget)
 
     def open_settings(self):
+        if hasattr(self, 'settings_dialog') and self.settings_dialog is not None:
+            self.settings_dialog.load_settings()
         self.settings_dock.show()
+
+    def show_help(self):
+        help_text = (
+            "Настройка MQTT для работы через интернет:\n\n"
+            "1. Откройте Меню -> Настройки -> MQTT.\n"
+            "2. Укажите адрес брокера (домен/IP).\n"
+            "3. Выберите транспорт:\n"
+            "   - TCP: обычный MQTT (обычно порт 1883 или 8883 для TLS)\n"
+            "   - WebSockets: MQTT поверх WebSocket (обычно 8080/8083/443)\n"
+            "4. При необходимости укажите логин/пароль.\n"
+            "5. Включите TLS для защищенного подключения.\n"
+            "6. Для WebSockets укажите путь (обычно /mqtt).\n"
+            "7. Нажмите 'Проверить MQTT подключение', затем 'Сохранить'.\n\n"
+            "Рекомендации:\n"
+            "- Для интернета используйте TLS.\n"
+            "- Не включайте 'недоверенный сертификат' в продакшене.\n"
+            "- Сервер и клиент должны использовать одинаковые настройки брокера."
+        )
+        QMessageBox.information(self, "Помощь", help_text)
+
+    def show_about(self):
+        about_text = (
+            "pyStudyFlash\n"
+            "Удаленный просмотр и управление экраном через MQTT.\n\n"
+            "Версия: локальная сборка\n"
+            "Поддержка MQTT: TCP / WebSockets, логин/пароль, TLS."
+        )
+        QMessageBox.information(self, "О программе", about_text)
 
     def start_pub_server(self):  # ????????? ?????? ??????? ? ?????? ??????????
         if self.server is None:
@@ -599,6 +985,12 @@ class ScreenShareApp(QMainWindow):
             self.pub_mqtt_address = str(settings.value('mqtt_address', self.pub_mqtt_address, type=str) or '').strip()
             self.pub_mqtt_port = settings.value('mqtt_port', self.pub_mqtt_port, type=int)
             self.pub_mqtt_timeout = settings.value('mqtt_timeout', self.pub_mqtt_timeout, type=int)
+            self.pub_mqtt_username = str(settings.value('mqtt_username', self.pub_mqtt_username, type=str) or '').strip()
+            self.pub_mqtt_password = str(settings.value('mqtt_password', self.pub_mqtt_password, type=str) or '')
+            self.pub_mqtt_transport = str(settings.value('mqtt_transport', self.pub_mqtt_transport, type=str) or 'tcp').strip().lower()
+            self.pub_mqtt_use_tls = self._setting_bool(settings.value('mqtt_use_tls', self.pub_mqtt_use_tls))
+            self.pub_mqtt_tls_insecure = self._setting_bool(settings.value('mqtt_tls_insecure', self.pub_mqtt_tls_insecure))
+            self.pub_mqtt_ws_path = str(settings.value('mqtt_ws_path', self.pub_mqtt_ws_path, type=str) or '/mqtt').strip() or '/mqtt'
         server_address = str(self.pub_server_address or '').strip()
         server_password = str(self.pub_server_password or '').strip()
         mqtt_address = str(self.pub_mqtt_address or '').strip() or 'broker.hivemq.com'
@@ -612,14 +1004,48 @@ class ScreenShareApp(QMainWindow):
             mqtt_timeout = 0
         self.server.show()
         if not mqtt_address:
-            print('MQTT ????? ?? ?????, ?????? ?? ???????')
+            print('MQTT адрес не задан, запуск не выполнен')
             return
+        self.server.mqtt_username = self.pub_mqtt_username
+        self.server.mqtt_password = self.pub_mqtt_password
+        self.server.mqtt_transport = self.pub_mqtt_transport
+        self.server.mqtt_use_tls = self.pub_mqtt_use_tls
+        self.server.mqtt_tls_insecure = self.pub_mqtt_tls_insecure
+        self.server.mqtt_ws_path = self.pub_mqtt_ws_path
         self.server.run(server_address, server_password, mqtt_address, mqtt_port, mqtt_timeout)
 
-    def connect_to_server(self, server_address='address@mail.com', server_password='', mqtt_address='', mqtt_port=0,
-                          mqtt_timeout=0):
+    def connect_to_server(self, server_address='address@mail.com', server_password='', mqtt_address=None, mqtt_port=None,
+                          mqtt_timeout=None, mqtt_username=None, mqtt_password=None, mqtt_transport=None,
+                          mqtt_use_tls=None, mqtt_tls_insecure=None, mqtt_ws_path=None):
+        default_mqtt_username = ''
+        default_mqtt_password = ''
+        default_mqtt_transport = 'tcp'
+        default_mqtt_use_tls = False
+        default_mqtt_tls_insecure = False
+        default_mqtt_ws_path = '/mqtt'
+        settings_common = getattr(self, 'settings', None)
+        if settings_common is not None:
+            default_mqtt_username = str(settings_common.value('mqtt_username', '', type=str) or '').strip()
+            default_mqtt_password = str(settings_common.value('mqtt_password', '', type=str) or '')
+            default_mqtt_transport = str(settings_common.value('mqtt_transport', 'tcp', type=str) or 'tcp').strip().lower()
+            default_mqtt_use_tls = self._setting_bool(settings_common.value('mqtt_use_tls', False))
+            default_mqtt_tls_insecure = self._setting_bool(settings_common.value('mqtt_tls_insecure', False))
+            default_mqtt_ws_path = str(settings_common.value('mqtt_ws_path', '/mqtt', type=str) or '/mqtt').strip() or '/mqtt'
+
         # Когда метод вызывается без аргументов, используем UI и сохранённые настройки
-        if server_address == 'address@mail.com' and not server_password and not mqtt_address and mqtt_port == 0 and mqtt_timeout == 0:
+        if (
+            server_address == 'address@mail.com'
+            and not server_password
+            and mqtt_address is None
+            and mqtt_port is None
+            and mqtt_timeout is None
+            and mqtt_username is None
+            and mqtt_password is None
+            and mqtt_transport is None
+            and mqtt_use_tls is None
+            and mqtt_tls_insecure is None
+            and mqtt_ws_path is None
+        ):
             address_input = self.server_address_input.text().strip() if hasattr(self, 'server_address_input') else ''
             settings = getattr(self, 'settings', None)
             if settings is not None:
@@ -627,9 +1053,15 @@ class ScreenShareApp(QMainWindow):
                 # Explicitly convert QSettings values to proper types with type=str to prevent bool conversion
                 server_address = address_input or str(settings.value('server_address', '', type=str))
                 server_password = str(settings.value('server_password', '', type=str))
-                mqtt_address = str(settings.value('mqtt_address', '', type=str))
+                mqtt_address = str(settings.value('mqtt_address', '', type=str) or '').strip()
                 mqtt_port = settings.value('mqtt_port', 0, type=int)
                 mqtt_timeout = settings.value('mqtt_timeout', 0, type=int)
+                mqtt_username = default_mqtt_username
+                mqtt_password = default_mqtt_password
+                mqtt_transport = default_mqtt_transport
+                mqtt_use_tls = default_mqtt_use_tls
+                mqtt_tls_insecure = default_mqtt_tls_insecure
+                mqtt_ws_path = default_mqtt_ws_path
                 
                 # Debug output
                 print(f"Client configuration:")
@@ -644,10 +1076,49 @@ class ScreenShareApp(QMainWindow):
                 mqtt_address = ''
                 mqtt_port = 0
                 mqtt_timeout = 0
-        
-        mqtt_port = int(str(mqtt_port).strip() or 0)
-        mqtt_timeout = int(str(mqtt_timeout).strip() or 0)
-        
+                mqtt_username = default_mqtt_username
+                mqtt_password = default_mqtt_password
+                mqtt_transport = default_mqtt_transport
+                mqtt_use_tls = default_mqtt_use_tls
+                mqtt_tls_insecure = default_mqtt_tls_insecure
+                mqtt_ws_path = default_mqtt_ws_path
+
+        # Для вызовов из адресной книги: пустые поля используют глобальные настройки.
+        if mqtt_address is None:
+            mqtt_address = str(settings_common.value('mqtt_address', '', type=str) or '').strip() if settings_common else ''
+        if mqtt_port is None:
+            mqtt_port = settings_common.value('mqtt_port', 0, type=int) if settings_common else 0
+        if mqtt_timeout is None:
+            mqtt_timeout = settings_common.value('mqtt_timeout', 0, type=int) if settings_common else 0
+        if mqtt_username is None:
+            mqtt_username = default_mqtt_username
+        if mqtt_password is None:
+            mqtt_password = default_mqtt_password
+        if mqtt_transport is None:
+            mqtt_transport = default_mqtt_transport
+        if mqtt_use_tls is None:
+            mqtt_use_tls = default_mqtt_use_tls
+        if mqtt_tls_insecure is None:
+            mqtt_tls_insecure = default_mqtt_tls_insecure
+        if mqtt_ws_path is None:
+            mqtt_ws_path = default_mqtt_ws_path
+
+        mqtt_address = str(mqtt_address or '').strip()
+        mqtt_transport = str(mqtt_transport or 'tcp').strip().lower()
+        if mqtt_transport not in {'tcp', 'websockets'}:
+            mqtt_transport = 'tcp'
+        mqtt_ws_path = str(mqtt_ws_path or '/mqtt').strip() or '/mqtt'
+        mqtt_use_tls = self._setting_bool(mqtt_use_tls)
+        mqtt_tls_insecure = self._setting_bool(mqtt_tls_insecure)
+        try:
+            mqtt_port = int(str(mqtt_port).strip() or 0)
+        except (TypeError, ValueError):
+            mqtt_port = 0
+        try:
+            mqtt_timeout = int(str(mqtt_timeout).strip() or 0)
+        except (TypeError, ValueError):
+            mqtt_timeout = 0
+
         # Validate server_address is a non-empty string
         if not server_address or not isinstance(server_address, str):
             print(f"Invalid server_address: {server_address} (type: {type(server_address)})")
@@ -659,6 +1130,12 @@ class ScreenShareApp(QMainWindow):
         client.mqtt_address = mqtt_address
         client.mqtt_port = mqtt_port
         client.mqtt_timeout = mqtt_timeout
+        client.mqtt_username = mqtt_username
+        client.mqtt_password = mqtt_password
+        client.mqtt_transport = mqtt_transport
+        client.mqtt_use_tls = mqtt_use_tls
+        client.mqtt_tls_insecure = mqtt_tls_insecure
+        client.mqtt_ws_path = mqtt_ws_path
         client.user_initiated_close = False
 
         existing_window = self.servers.get(server_address)
@@ -710,13 +1187,29 @@ class ScreenShareApp(QMainWindow):
                 mqtt_address_item = table.item(row, 4)
                 mqtt_port_item = table.item(row, 5)
                 mqtt_timeout_item = table.item(row, 6)
+                mqtt_username_item = table.item(row, 7)
+                mqtt_password_item = table.item(row, 8)
+                mqtt_transport_item = table.item(row, 9)
+                mqtt_tls_item = table.item(row, 10)
+                mqtt_tls_insecure_item = table.item(row, 11)
+                mqtt_ws_path_item = table.item(row, 12)
+                tls_value = str(_text(mqtt_tls_item)).lower()
+                tls_insecure_value = str(_text(mqtt_tls_insecure_item)).lower()
+                mqtt_use_tls = None if tls_value == '' else tls_value in {'1', 'true', 'yes', 'on'}
+                mqtt_tls_insecure = None if tls_insecure_value == '' else tls_insecure_value in {'1', 'true', 'yes', 'on'}
                 return {
                     'server_address': _text(server_item),
                     'username': _text(user_item),
                     'password': _text(password_item),
                     'mqtt_address': _text(mqtt_address_item),
                     'mqtt_port': _parse_int(_text(mqtt_port_item)),
-                    'mqtt_timeout': _parse_int(_text(mqtt_timeout_item))
+                    'mqtt_timeout': _parse_int(_text(mqtt_timeout_item)),
+                    'mqtt_username': _text(mqtt_username_item),
+                    'mqtt_password': _text(mqtt_password_item),
+                    'mqtt_transport': _text(mqtt_transport_item),
+                    'mqtt_use_tls': mqtt_use_tls,
+                    'mqtt_tls_insecure': mqtt_tls_insecure,
+                    'mqtt_ws_path': _text(mqtt_ws_path_item),
                 }
         return None
 
@@ -727,7 +1220,11 @@ class ScreenShareApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     screenshare_app = ScreenShareApp()
+    screenshare_app.setWindowTitle('pyStudyFlash')
     screenshare_app.showMaximized()  # Показать окно на весь экран
+    screenshare_app.raise_()
+    screenshare_app.activateWindow()
+    print('pyStudyFlash main window shown')
     sys.exit(app.exec())
 
 
