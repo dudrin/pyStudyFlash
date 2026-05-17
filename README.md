@@ -560,3 +560,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_all.ps1 -AppVersion 1.0
   - Порт: `443`
   - TLS: `включен`
   - WebSocket path: чаще всего `/mqtt`
+
+## Подробная сборка установщика
+
+Подробная инструкция на русском: [docs/BUILD_INSTALLER_RU.md](docs/BUILD_INSTALLER_RU.md).
